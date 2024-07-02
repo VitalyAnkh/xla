@@ -51,7 +51,9 @@ tf_proto_library(
     srcs = ["hlo.proto"],
     cc_api_version = 2,
     make_default_target_header_only = True,
-    protodeps = ["//xla:xla_data_proto"],
+    protodeps = [
+        "//xla:xla_data_proto",
+    ] + if_google(["@com_google_protobuf//:any"]),
     visibility = ["//visibility:public"],
 )
 
@@ -79,6 +81,11 @@ tf_proto_library(
     name = "metrics_proto",
     srcs = ["metrics.proto"],
     cc_api_version = 2,
+    protodeps = if_google([
+        "@com_google_protobuf//:any",
+        "@com_google_protobuf//:duration",
+        "@com_google_protobuf//:timestamp",
+    ]),
     visibility = ["//visibility:public"],
 )
 
@@ -587,7 +594,6 @@ cc_library(
         "//xla:xla_data_proto_cc",
         "//xla/hlo/evaluator:hlo_evaluator",
         "//xla/hlo/ir:hlo",
-        "//xla/hlo/ir:hlo_instruction_utils",
         "//xla/hlo/utils:hlo_query",
         "//xla/service:hlo_parser",
         "@com_google_absl//absl/algorithm:container",
@@ -757,8 +763,10 @@ cc_library(
         ":call_graph",
         ":custom_call_sharding_helper",
         ":dot_as_convolution_util",
+        ":hlo_cse",
         ":hlo_graph_dumper",
         ":hlo_pass",
+        ":hlo_pass_pipeline",
         ":host_memory_offload_annotations_hdr",
         "//xla:array",
         "//xla:protobuf_util",
@@ -1152,7 +1160,16 @@ cc_library(
     hdrs = ["hlo_computation_deduplicator.h"],
     deps = [
         ":hlo_pass",
+        "//xla:shape_util",
+        "//xla:status_macros",
+        "//xla:util",
         "//xla/hlo/ir:hlo",
+        "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/container:flat_hash_set",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/strings:string_view",
+        "@tsl//tsl/platform:logging",
     ],
 )
 
@@ -1164,6 +1181,7 @@ xla_cc_test(
         ":hlo_computation_deduplicator",
         ":hlo_pass",
         "//xla:literal",
+        "//xla:literal_util",
         "//xla:shape_util",
         "//xla:test",
         "//xla:types",
@@ -1174,6 +1192,7 @@ xla_cc_test(
         "//xla/tests:xla_internal_test_main",
         "@com_google_googletest//:gtest_main",
         "@tsl//tsl/lib/core:status_test_util",
+        "@tsl//tsl/platform:statusor",
     ],
 )
 
@@ -2623,7 +2642,6 @@ cc_library(
         "//xla:xla_data_proto_cc",
         "//xla/hlo/evaluator:hlo_evaluator",
         "//xla/hlo/ir:hlo",
-        "//xla/hlo/ir:hlo_instruction_utils",
         "//xla/hlo/utils:hlo_sharding_util",
         "@com_google_absl//absl/algorithm:container",
         "@com_google_absl//absl/container:flat_hash_map",
@@ -3051,11 +3069,14 @@ cc_library(
     srcs = ["all_reduce_simplifier.cc"],
     hdrs = ["all_reduce_simplifier.h"],
     deps = [
+        ":collective_ops_utils",
+        ":hlo_module_config",
         ":hlo_pass",
         ":hlo_replication_analysis",
         "//xla:literal_util",
         "//xla:shape_util",
         "//xla/hlo/ir:hlo",
+        "@com_google_absl//absl/algorithm:container",
         "@com_google_absl//absl/container:flat_hash_set",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status:statusor",
@@ -3070,6 +3091,7 @@ xla_cc_test(
     srcs = ["all_reduce_simplifier_test.cc"],
     deps = [
         ":all_reduce_simplifier",
+        ":hlo_module_config",
         ":hlo_parser",
         ":pattern_matcher",
         ":pattern_matcher_gmock",
@@ -3416,12 +3438,14 @@ cc_library(
         "//xla:shape_util",
         "//xla:util",
         "//xla/hlo/ir:hlo",
+        "@com_google_absl//absl/algorithm:container",
         "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/container:flat_hash_set",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/log:check",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
         "@com_google_absl//absl/strings:string_view",
         "@tsl//tsl/platform:errors",
         "@tsl//tsl/platform:statusor",
@@ -3862,7 +3886,12 @@ cc_library(
     hdrs = ["tuple_simplifier.h"],
     deps = [
         ":hlo_pass",
+        "//xla:shape_util",
         "//xla/hlo/ir:hlo",
+        "@com_google_absl//absl/container:flat_hash_set",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
+        "@tsl//tsl/platform:statusor",
     ],
 )
 
@@ -3871,15 +3900,15 @@ xla_cc_test(
     srcs = ["tuple_simplifier_test.cc"],
     deps = [
         ":tuple_simplifier",
-        "//xla:literal",
         "//xla:shape_util",
         "//xla:test",
-        "//xla:types",
         "//xla/hlo/ir:hlo",
         "//xla/hlo/utils:hlo_matchers",
         "//xla/tests:hlo_test_base",
         "//xla/tests:xla_internal_test_main",
+        "@com_google_absl//absl/strings",
         "@tsl//tsl/lib/core:status_test_util",
+        "@tsl//tsl/platform:statusor",
     ],
 )
 
@@ -4445,10 +4474,9 @@ cc_library(
     deps = [
         ":hlo_proto_cc",
         "//xla:shape_util",
-        "//xla:types",
         "//xla:xla_data_proto_cc",
         "//xla/hlo/ir:hlo",
-        "@com_google_absl//absl/types:span",
+        "@com_google_absl//absl/base:core_headers",
         "@tsl//tsl/platform:logging",
     ],
 )
@@ -5373,6 +5401,8 @@ cc_library(
         "//xla:literal",
         "//xla:shape_util",
         "//xla/hlo/ir:hlo",
+        "//xla/hlo/utils:hlo_sharding_util",
+        "@com_google_absl//absl/algorithm:container",
         "@com_google_absl//absl/container:flat_hash_set",
         "@com_google_absl//absl/status:statusor",
         "@tsl//tsl/platform:errors",
@@ -7248,6 +7278,7 @@ xla_cc_test(
         "//xla/tests:xla_internal_test_main",
         "@com_google_absl//absl/algorithm:container",
         "@com_google_absl//absl/strings:string_view",
+        "@com_google_googletest//:gtest_main",
         "@tsl//tsl/lib/core:status_test_util",
         "@tsl//tsl/platform:statusor",
         "@tsl//tsl/platform:test",
@@ -7567,7 +7598,7 @@ cc_library(
         "@tsl//tsl/platform:protobuf",
         "@tsl//tsl/platform:status",
         "@tsl//tsl/platform:statusor",
-    ],
+    ] + if_google(["@com_google_protobuf//:any_cc_proto"]),
 )
 
 cc_library(
@@ -8155,7 +8186,7 @@ tf_proto_library(
     protodeps = [
         ":hlo_proto",
         "@tsl//tsl/protobuf:status_proto",
-    ],
+    ] + if_google(["@com_google_protobuf//:duration"]),
     visibility = ["//visibility:public"],
 )
 

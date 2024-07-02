@@ -46,8 +46,10 @@ pytype_strict_library(
     visibility = ["//visibility:public"],
     deps = [
         ":xla_extension",  # buildcleaner: keep
+    ] + if_google([
         "@ml_dtypes",
-    ],
+        "//third_party/py/numpy",
+    ]),
 )
 
 exports_files([
@@ -76,7 +78,10 @@ py_strict_test(
         ":xla_client",
         ":xla_extension",
         "@absl_py//absl/testing:absltest",
-    ] + xla_py_test_deps(),
+    ] + if_google([
+        "//third_party/py/numpy",
+        "//third_party/py/portpicker",
+    ]) + xla_py_test_deps(),
 )
 
 py_strict_library(
@@ -91,7 +96,7 @@ py_strict_library(
         "@absl_py//absl/logging",
         "@absl_py//absl/testing:absltest",
         "@absl_py//absl/testing:parameterized",
-    ],
+    ] + if_google(["//third_party/py/numpy"]),
 )
 
 py_strict_test(
@@ -113,7 +118,7 @@ py_strict_test(
         "@absl_py//absl/logging",
         "@absl_py//absl/testing:absltest",
         "@absl_py//absl/testing:parameterized",
-    ] + xla_py_test_deps(),
+    ] + if_google(["//third_party/py/numpy"]) + xla_py_test_deps(),
 )
 
 py_strict_test(
@@ -150,7 +155,11 @@ py_strict_test(
         "@absl_py//absl/testing:absltest",
         "@absl_py//absl/testing:parameterized",
     ] + if_google(
-        [":xla_gpu_extension"],
+        [
+            ":xla_gpu_extension",
+            "//third_party/py/numpy",
+            "//xla/service:gpu_plugin",
+        ],
         [],
     ) + xla_py_test_deps(),
 )
@@ -256,10 +265,10 @@ cc_library(
         "@com_google_absl//absl/hash",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/strings:str_format",
-        "@local_config_python//:python_headers",  # buildcleaner: keep
         "//xla/pjrt:exceptions",
         "@tsl//tsl/platform",
         "@tsl//tsl/platform:logging",
+        "@local_config_python//:python_headers",  # buildcleaner: keep
         "@nanobind",
     ],
 )
@@ -357,7 +366,6 @@ cc_library(
         "@com_google_absl//absl/time",
         "@com_google_absl//absl/types:span",
         "@com_google_absl//absl/types:variant",
-        "@local_config_python//:python_headers",  # buildcleaner: keep
         "//xla:comparison_util",
         "//xla:literal",
         "//xla:shape_util",
@@ -386,10 +394,12 @@ cc_library(
         "//xla/pjrt/distributed",
         "//xla/pjrt/distributed:client",
         "//xla/python/ifrt",
+        "//xla/python/ifrt:attribute_map",
         "//xla/python/ifrt:plugin_program",
         "//xla/python/ifrt:plugin_program_serdes",
         "//xla/python/ifrt/hlo:hlo_program",
         "//xla/python/pjrt_ifrt",
+        "//xla/python/pjrt_ifrt:pjrt_attribute_map_util",
         "//xla/python/pjrt_ifrt:xla_host_callback_proto_cc",
         "//xla/python/pjrt_ifrt:xla_ifrt",
         "//xla/service:computation_placer_hdr",
@@ -409,9 +419,9 @@ cc_library(
         "@tsl//tsl/profiler/lib:profiler_session",
         "@tsl//tsl/profiler/lib:traceme",
         "@tsl//tsl/profiler/protobuf:profiled_instructions_proto_cc",
-        "@com_google_protobuf//:protobuf",
         "@llvm-project//llvm:Support",
         "@llvm-project//mlir:IR",
+        "@local_config_python//:python_headers",  # buildcleaner: keep
         "@nanobind",
     ] + if_cuda([
         "@local_config_cuda//cuda:cuda_headers",
@@ -419,7 +429,9 @@ cc_library(
         "//xla/stream_executor/cuda:cuda_driver",
     ]) + if_rocm([
         "@local_config_rocm//rocm:rocm_headers",
-    ]) + if_cuda_or_rocm([":py_client_gpu"]),  # TODO(b/337876408): remove after migration to plugin
+    ]) + if_cuda_or_rocm([
+        ":py_client_gpu",  # TODO(b/337876408): remove after migration to plugin
+    ]) + if_google(["@com_google_protobuf//:any_cc_proto"]),
 )
 
 cc_library(
@@ -484,6 +496,7 @@ cc_library(
         "//xla/pjrt:host_callback",
         "//xla/service:custom_call_status",
         "@com_google_absl//absl/base",
+        "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
         "@nanobind",
         "@tsl//tsl/platform:errors",
@@ -562,11 +575,11 @@ cc_library(
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/strings:str_format",
         "@com_google_absl//absl/types:span",
-        "@local_config_python//:python_headers",  # build_cleaner: keep
         "//xla/pjrt:pjrt_client",
         "//xla/pjrt:status_casters",
         "@tsl//tsl/platform:logging",
         "@tsl//tsl/profiler/lib:traceme",
+        "@local_config_python//:python_headers",  # build_cleaner: keep
         "@nanobind",
     ],
 )
@@ -737,7 +750,6 @@ cc_library(
         "@com_google_absl//absl/strings:str_format",
         "@com_google_absl//absl/synchronization",
         "@com_google_absl//absl/types:span",
-        "@local_config_python//:python_headers",  # buildcleaner: keep
         "//xla:util",
         "//xla/pjrt:exceptions",
         "//xla/pjrt:lru_cache",
@@ -750,6 +762,7 @@ cc_library(
         "@tsl//tsl/platform:logging",
         "@tsl//tsl/platform:statusor",
         "@tsl//tsl/profiler/lib:traceme",
+        "@local_config_python//:python_headers",  # buildcleaner: keep
         "@nanobind",
     ],
 )
@@ -785,7 +798,6 @@ cc_library(
         "@com_google_absl//absl/strings:str_format",
         "@com_google_absl//absl/synchronization",
         "@com_google_absl//absl/types:span",
-        "@local_config_python//:python_headers",  # buildcleaner: keep
         "//xla:status_macros",
         "//xla:util",
         "//xla:xla_data_proto_cc",
@@ -798,6 +810,7 @@ cc_library(
         "@tsl//tsl/platform:logging",
         "@tsl//tsl/platform:statusor",
         "@tsl//tsl/profiler/lib:traceme",
+        "@local_config_python//:python_headers",  # buildcleaner: keep
         "@nanobind",
     ],
 )
@@ -900,9 +913,9 @@ cc_library(
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/strings:str_format",
         "@com_google_absl//absl/types:span",
-        "@local_config_python//:python_headers",  # buildcleaner: keep
         "//xla/pjrt:exceptions",
         "@tsl//tsl/platform:logging",
+        "@local_config_python//:python_headers",  # buildcleaner: keep
         "@nanobind",
     ],
 )
@@ -1343,7 +1356,6 @@ tsl_pybind_extension(
         "@com_google_absl//absl/synchronization",
         "@com_google_absl//absl/time",
         "@com_google_absl//absl/types:span",
-        "@local_config_python//:python_headers",  # buildcleaner: keep
         "//xla:literal",
         "//xla:shape_util",
         "//xla:types",
@@ -1383,6 +1395,7 @@ tsl_pybind_extension(
         "@tsl//tsl/platform/cloud:gcs_file_system",
         "@llvm-project//llvm:Support",
         "@llvm-project//mlir:IR",
+        "@local_config_python//:python_headers",  # buildcleaner: keep
         "@nanobind",
     ] + select({
         # gloo transport only builds on linux

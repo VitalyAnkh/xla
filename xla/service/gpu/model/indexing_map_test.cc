@@ -562,6 +562,18 @@ TEST_F(IndexingMapTest, AffineMapSimplification_ConstantDims) {
                                                 )"));
 }
 
+TEST_F(IndexingMapTest, AffineMapSimplification_SumOrderRegression) {
+  // This is a regression test for a bug where we didn't canonicalize the order
+  // of summands correctly, leading to `Simplify` not being idempotent.
+  IndexingMap indexing_map = IndexingMap::FromTensorSizes(
+      ParseAffineMap("(d0, d1)[s0, s1] -> (((((d0 + (d0 mod 3)) floordiv 3) + "
+                     "(s0 + ((s0 + s0) mod 3))) + (((d0 + s0) mod 3) + 0)))",
+                     &mlir_context_),
+      {10, 20}, {30, 40});
+  EXPECT_TRUE(indexing_map.Simplify());
+  EXPECT_FALSE(indexing_map.Simplify());
+}
+
 TEST_F(IndexingMapTest,
        AffineMapSimplification_DivsAndModsIfSmallerThanDivisor) {
   auto serialized_map = "(d0, d1) -> (d0 + d1 floordiv 16, d1 mod 16)";
@@ -655,6 +667,21 @@ TEST_F(IndexingMapTest, AffineMapSimplification_SimplifyReshape2) {
   )"));
 }
 
+TEST_F(IndexingMapTest, AffineMapSimplification_SimplifyReshape3) {
+  auto serialized_map =
+      "(d0, d1) -> (((d1 * 2 + d0 floordiv 64) mod 3) * 256 + (d0 mod 64) * 4 "
+      "+ ((d1 * 128 + d0) floordiv 192) * 768)";
+  IndexingMap indexing_map = IndexingMap::FromTensorSizes(
+      ParseAffineMap(serialized_map, &mlir_context_), {128, 3072}, {});
+  EXPECT_TRUE(indexing_map.Simplify());
+  EXPECT_THAT(indexing_map.ToString(printer_), MatchIndexingString(R"(
+      (d0, d1) -> (d0 * 4 + d1 * 512)
+      domain:
+      d0 in [0, 128)
+      d1 in [0, 3072)
+  )"));
+}
+
 TEST_F(IndexingMapTest,
        AffineMapSimplification_ModWithNegativeMultiplerDoesNotGetSimplified) {
   auto serialized_map = "(d0) -> ((-d0) mod 2)";
@@ -713,6 +740,28 @@ TEST_F(IndexingMapTest, AffineMapSimplification_DivsInSequence) {
                                                  domain:
                                                  s0 in [0, 1234)
                                                )"));
+}
+
+TEST_F(IndexingMapTest, AffineMapSimplification_DivDiv) {
+  auto serialized_map = "()[s0, s1] -> ((s0 * 2 + s1 floordiv 64) floordiv 3)";
+  IndexingMap indexing_map = IndexingMap::FromTensorSizes(
+      ParseAffineMap(serialized_map, &mlir_context_), {}, {1234, 128});
+  EXPECT_TRUE(indexing_map.Simplify());
+  EXPECT_THAT(indexing_map.ToString(printer_), MatchIndexingString(R"(
+      ()[s0, s1] -> ((s0 * 128 + s1) floordiv 192)
+      domain:
+      s0 in [0, 1234)
+      s1 in [0, 128)
+    )"));
+}
+
+TEST_F(IndexingMapTest, AffineMapSimplification_DivSumDiv) {
+  auto serialized_map =
+      "()[s0, s1] -> ((s0 floordiv 3 + s1 floordiv 3) floordiv 6)";
+  IndexingMap indexing_map = IndexingMap::FromTensorSizes(
+      ParseAffineMap(serialized_map, &mlir_context_), {}, {1234, 128});
+  // The rewrite tested in AffineMapSimplification_DivDiv must not trigger here.
+  EXPECT_FALSE(indexing_map.Simplify());
 }
 
 TEST_F(IndexingMapTest, AffineMapSimplification_NegativeDiv) {
