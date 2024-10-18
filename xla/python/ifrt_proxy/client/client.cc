@@ -120,11 +120,11 @@ absl::StatusOr<std::unique_ptr<Client>> Client::Create(
         std::make_unique<Device>(std::move(desc), d.local_device_id(),
                                  d.local_hardware_id(), is_addressable);
     all_device_ptrs.push_back(device.get());
-    if (is_addressable) {
-      addressable_device_ptrs.push_back(device.get());
-    }
     if (is_primary) {
       primary_device_ptrs.push_back(device.get());
+      if (is_addressable) {
+        addressable_device_ptrs.push_back(device.get());
+      }
     }
 
     if (d.has_default_memory_id()) {
@@ -232,7 +232,19 @@ Client::AssembleArrayFromSingleDeviceArrays(
     absl::Span<tsl::RCReference<xla::ifrt::Array>> arrays,
     ArrayCopySemantics semantics) {
   return Array::AssembleArrayFromSingleDeviceArrays(
-      this, rpc_helper_, std::move(shape), sharding, arrays, semantics);
+      this, rpc_helper_, std::move(shape), sharding, arrays, semantics,
+      SingleDeviceShardSemantics::kAllShards);
+}
+
+absl::StatusOr<tsl::RCReference<xla::ifrt::Array>>
+Client::AssembleArrayFromSingleDeviceArrays(
+    Shape shape, std::shared_ptr<const Sharding> sharding,
+    absl::Span<tsl::RCReference<xla::ifrt::Array>> arrays,
+    ArrayCopySemantics array_copy_semantics,
+    SingleDeviceShardSemantics single_device_shard_semantics) {
+  return Array::AssembleArrayFromSingleDeviceArrays(
+      this, rpc_helper_, std::move(shape), sharding, arrays,
+      array_copy_semantics, single_device_shard_semantics);
 }
 
 absl::StatusOr<std::vector<tsl::RCReference<xla::ifrt::Array>>>

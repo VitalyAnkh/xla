@@ -42,6 +42,8 @@ limitations under the License.
 #include "xla/hlo/ir/hlo_opcode.h"
 #include "xla/hlo/ir/hlo_schedule.h"
 #include "xla/hlo/ir/hlo_sharding.h"
+#include "xla/hlo/parser/hlo_parser.h"
+#include "xla/hlo/testlib/verified_hlo_module.h"
 #include "xla/hlo/utils/hlo_live_range.h"
 #include "xla/hlo/utils/hlo_matchers.h"
 #include "xla/service/buffer_value.h"
@@ -70,6 +72,7 @@ using ::testing::IsTrue;
 using ::testing::Not;
 using ::testing::Pair;
 using ::testing::ResultOf;
+using ::testing::SizeIs;
 using ::testing::UnorderedElementsAre;
 using ::testing::status::StatusIs;
 
@@ -590,9 +593,35 @@ ENTRY %elementwise {
   TF_ASSERT_OK_AND_ASSIGN(bool changed, AutoSharding(option).Run(module.get()));
   VLOG(10) << module->ToString();
   EXPECT_TRUE(changed);
-  auto* instruction = FindInstruction(module.get(), "param0");
+  const HloInstruction* instruction = FindInstruction(module.get(), "param0");
   ASSERT_NE(instruction, nullptr);
   EXPECT_THAT(instruction, op::Sharding("{devices=[2,2]0,2,1,3}"));
+}
+
+TEST_F(AutoShardingTest, RedundantReshardReshapeTest) {
+  constexpr absl::string_view kHloString = R"(
+HloModule module
+ENTRY %elementwise {
+  param0 = bf16[4,68096]{1,0} parameter(0), sharding={replicated}
+  param1 = s8[68096,8512]{1,0} parameter(1), sharding={devices=[1,16,8]<=[128] last_tile_dim_replicate}
+  convolution = bf16[4,8512]{1,0} convolution(param0, param1), dim_labels=bf_io->bf, sharding={devices=[1,128]<=[128]}
+
+})";
+
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<VerifiedHloModule> module,
+                          ParseAndReturnVerifiedModule(kHloString));
+  AutoShardingOption option;
+  option.preserve_shardings =
+      AutoShardingOption::PreserveShardingsType::kKeepAllShardings;
+  option.enable = true;
+  option.device_mesh_shape = {16, 8};
+  TF_ASSERT_OK_AND_ASSIGN(bool changed, AutoSharding(option).Run(module.get()));
+  VLOG(5) << module->ToString();
+  EXPECT_TRUE(changed);
+  std::vector<HloInstruction*> instructions =
+      module->entry_computation()->MakeInstructionPostOrder();
+  // Check that only one additional reshape op is inserted
+  EXPECT_THAT(instructions, SizeIs(4));
 }
 
 TEST_F(AutoShardingTest, ConvolutionSplitDepthwiseTest) {
@@ -2926,6 +2955,72 @@ ENTRY matmul {
   option.device_mesh_beta = {0.01, 1.0};
   TF_ASSERT_OK_AND_ASSIGN(bool changed, AutoSharding(option).Run(module.get()));
   EXPECT_TRUE(changed);
+}
+
+TEST_F(AutoShardingTest, SimpleDCNTest) {
+  constexpr absl::string_view kHloString = R"(
+HloModule module
+
+%func (x: f32[], y: f32[]) -> f32[] {
+  %x = f32[] parameter(0)
+  %y = f32[] parameter(1)
+  ROOT %add = f32[] add(f32[] %x, f32[] %y)
+}
+
+ENTRY %entry {
+  %param0 = f32[32,8192]{1,0} parameter(0)
+  %param1 = f32[] parameter(1)
+  %reduce = f32[32]{0} reduce(f32[32,8192]{1,0} %param0, f32[] %param1), dimensions={1}, to_apply=%func
+  })";
+  AutoShardingOption option;
+  option.enable = true;
+  option.solve_nd_sharding_iteratively = false;
+  option.allow_mixed_mesh_shape = false;
+  option.device_mesh_shape = {8, 16};
+  option.num_dcn_slices = 8;
+
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<VerifiedHloModule> module,
+                          ParseAndReturnVerifiedModule(kHloString));
+  TF_ASSERT_OK_AND_ASSIGN(bool changed, AutoSharding(option).Run(module.get()));
+  VLOG(5) << module->ToString();
+  EXPECT_TRUE(changed);
+  const HloInstruction* slice = FindInstruction(module.get(), "reduce");
+  EXPECT_NE(slice, nullptr);
+  EXPECT_THAT(slice,
+              op::Sharding("{devices=[8,16]<=[128] last_tile_dim_replicate}"));
+}
+
+TEST_F(AutoShardingTest, MissingAxisDCNTest) {
+  constexpr absl::string_view kHloString = R"(
+HloModule module
+
+%func (x: f32[], y: f32[]) -> f32[] {
+  %x = f32[] parameter(0)
+  %y = f32[] parameter(1)
+  ROOT %add = f32[] add(f32[] %x, f32[] %y)
+}
+
+ENTRY %entry {
+  %param0 = f32[32,8192]{1,0} parameter(0)
+  %param1 = f32[] parameter(1)
+  %reduce = f32[32]{0} reduce(f32[32,8192]{1,0} %param0, f32[] %param1), dimensions={1}, to_apply=%func
+  })";
+  AutoShardingOption option;
+  option.enable = true;
+  option.solve_nd_sharding_iteratively = false;
+  option.allow_mixed_mesh_shape = false;
+  option.device_mesh_shape = {8, 16};
+  option.num_dcn_slices = 4;
+
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<VerifiedHloModule> module,
+                          ParseAndReturnVerifiedModule(kHloString));
+  TF_ASSERT_OK_AND_ASSIGN(bool changed, AutoSharding(option).Run(module.get()));
+  VLOG(5) << module->ToString();
+  EXPECT_TRUE(changed);
+  const HloInstruction* slice = FindInstruction(module.get(), "reduce");
+  EXPECT_NE(slice, nullptr);
+  EXPECT_THAT(slice,
+              op::Sharding("{devices=[8,16]<=[128] last_tile_dim_replicate}"));
 }
 
 TEST(NormalizeTest, NormalizeHandlesNegativeCosts) {
