@@ -14,14 +14,7 @@ those to this list.
 """
 
 temporary_patch_list = [
-    # Patch merged into Triton upstream (https://github.com/triton-lang/triton/pull/5721)
-    # but not merged into llvm_head branch nor Google's fork yet.
-    # Without this XLA fails to build on macos crosscompile and other targets.
-    "//third_party/triton:temporary/header.patch",
-    # Force MMA v2 layout for Blackwell until MMA v5 support is integrated.
-    "//third_party/triton:temporary/sm100_mmav2.patch",
-    "//third_party/triton:temporary/fix_smem_vec_length.patch",
-    # To be removed on the next integrate as it is now copied to openxla/triton.
-    "//third_party/triton:temporary/xla_sparsity_extension.patch",
+    "//third_party/triton:temporary/fix_fence_insertion_race.patch",
+    "//third_party/triton:temporary/enable_peer_access.patch",
     # Add new patches just above this line
 ]
