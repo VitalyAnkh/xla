@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#if defined(INTEL_MKL) && defined(ENABLE_ONEDNN_V3)
+#if defined(INTEL_MKL)
 
 #include <utility>
 
@@ -104,7 +104,7 @@ class ConvolutionTest : public HloTestBase,
     std::ostringstream stream;
     std::for_each(
         fused_ops.begin(), fused_ops.end(),
-        [&](const absl::string_view& arg) { stream << "\"" << arg << "\","; });
+        [&](absl::string_view arg) { stream << "\"" << arg << "\","; });
     std::string fusions = stream.str();
     if (fused_ops.size() > 0) {
       fusions.pop_back();
@@ -639,4 +639,4 @@ INSTANTIATE_TEST_SUITE_P(
 }  // namespace cpu
 }  // namespace xla
 
-#endif  // INTEL_MKL && ENABLE_ONEDNN_V3
+#endif  // INTEL_MKL

@@ -16,12 +16,12 @@ limitations under the License.
 #include "xla/service/spmd/shardy/sdy_round_trip/pipelines.h"
 
 #include <cassert>
+#include <functional>
 
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Pass/PassRegistry.h"
 #include "mlir/Support/LLVM.h"
 #include "xla/service/hlo.pb.h"
-#include "xla/service/spmd/shardy/mhlo_round_trip/export_shardings.h"
 #include "xla/service/spmd/shardy/round_trip_common/export_named_computations.h"
 #include "xla/service/spmd/shardy/round_trip_common/pipeline_passes.h"
 #include "xla/service/spmd/shardy/sdy_round_trip/export_ops.h"
@@ -31,6 +31,7 @@ limitations under the License.
 #include "xla/service/spmd/shardy/sdy_round_trip/remove_size_one_axes.h"
 #include "xla/service/spmd/shardy/sdy_round_trip/shard_map_export.h"
 #include "xla/service/spmd/shardy/sdy_round_trip/shard_map_import.h"
+#include "xla/service/spmd/shardy/stablehlo_round_trip/export_shardings.h"
 
 namespace xla {
 namespace sdy {
@@ -41,15 +42,16 @@ void addSdyRoundTripExportPipeline(mlir::OpPassManager& pm) {
   pm.addPass(createExportNamedComputationsPass());
   pm.addPass(createSdyRoundTripExportOpsPass());
   pm.addPass(createSdyRoundTripShardMapExportPass());
-  // Preserve the SDY shardings for `createExportMhloShardingsPass` so that
+  // Preserve the SDY shardings for `createExportStablehloShardingsPass` so that
   // we have both `mhlo.sharding`s and hidden `sdy.sharding`s on the module. We
   // want to have `mhlo.sharding`s for Pathways to read from.
   pm.addPass(createSdyRoundTripExportShardyAttrsPass());
-  pm.addPass(createExportMhloShardingsPass());
+  pm.addPass(createExportStablehloShardingsPass());
 }
 
-void addSdyRoundTripImportPipeline(mlir::OpPassManager& pm) {
-  addCommonPreImportPasses(pm);
+void addSdyRoundTripImportPipeline(mlir::OpPassManager& pm,
+                                   bool enableConstantImport) {
+  addCommonPreImportPasses(pm, enableConstantImport);
   pm.addPass(createSdyRoundTripImportCallbackCustomCallsPass());
   pm.addPass(createSdyRoundTripImportShardyAttrsPass());
   pm.addPass(createSdyRoundTripShardMapImportPass());
@@ -60,7 +62,7 @@ void addSdyRoundTripImportPipeline(mlir::OpPassManager& pm) {
 void registerSdyRoundTripExportPipeline() {
   PassPipelineRegistration<> exportPipeline(
       "xla-sdy-round-trip-export-pipeline",
-      "Run passes to export the SDY (Shardy) dialect into an MHLO module, "
+      "Run passes to export the SDY (Shardy) dialect into an StableHLO module, "
       "but with the SDY ops/attrs saved for roundtripping.",
       addSdyRoundTripExportPipeline);
 }
@@ -68,8 +70,8 @@ void registerSdyRoundTripExportPipeline() {
 void registerSdyRoundTripImportPipeline() {
   PassPipelineRegistration<> importPipeline(
       "xla-sdy-round-trip-import-pipeline",
-      "Run passes to import an mhlo module into the SDY (Shardy) dialect.",
-      addSdyRoundTripImportPipeline);
+      "Run passes to import a StableHLO module into the SDY (Shardy) dialect.",
+      std::bind(addSdyRoundTripImportPipeline, std::placeholders::_1, true));
 }
 
 }  // namespace sdy

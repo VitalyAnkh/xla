@@ -48,8 +48,6 @@ cc_library(
 py_strict_test(
     name = "concatenate_kernel_emitter_test",
     srcs = ["concatenate_kernel_emitter_test.py"],
-    python_version = "PY3",
-    srcs_version = "PY3",
     tags = [
         "no_oss",
     ],
@@ -83,7 +81,6 @@ cc_library(
         "//xla/service/cpu:elemental_ir_emitter",
         "//xla/service/cpu:ir_emitter",
         "//xla/service/cpu:parallel_loop_emitter",
-        "//xla/service/cpu:shape_partition",
         "//xla/service/llvm_ir:ir_array",
         "//xla/service/llvm_ir:llvm_util",
         "//xla/service/llvm_ir:loop_emitter",

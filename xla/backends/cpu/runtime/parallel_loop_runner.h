@@ -19,9 +19,7 @@ limitations under the License.
 #include <atomic>
 #include <cstddef>
 #include <functional>
-#include <optional>
 
-#include "absl/time/time.h"
 #include "xla/tsl/concurrency/async_value_ref.h"
 #include "xla/tsl/concurrency/chain.h"
 
@@ -59,9 +57,7 @@ namespace xla::cpu {
 // synchronized by the user.
 class ParallelLoopRunner {
  public:
-  explicit ParallelLoopRunner(
-      const Eigen::ThreadPoolDevice* device,
-      std::optional<absl::Duration> worker_timeslice = std::nullopt);
+  explicit ParallelLoopRunner(const Eigen::ThreadPoolDevice* device);
 
   // Takes ownership of the runner and returns a done event. After the done
   // event is transferred to the caller, it is illegal to schedule more parallel
@@ -72,13 +68,24 @@ class ParallelLoopRunner {
   using Task1D = std::function<void(size_t offset)>;
 
   using Task1DTile1D = std::function<void(size_t offset, size_t extent)>;
+  using Task1DTile1DDynamic = std::function<void(size_t offset, size_t count)>;
 
   using Task2DTile1D =
       std::function<void(size_t offset_i, size_t offset_j, size_t extent_j)>;
+  using Task2DTile1DDynamic =
+      std::function<void(size_t offset_i, size_t offset_j, size_t count_j)>;
 
   using Task3DTile2D =
       std::function<void(size_t offset_i, size_t offset_j, size_t offset_k,
                          size_t extent_j, size_t extent_k)>;
+  using Task3DTile2DDynamic =
+      std::function<void(size_t offset_i, size_t offset_j, size_t offset_k,
+                         size_t count_j, size_t count_k)>;
+
+  // IMPORTANT: For `dynamic` versions of the parallel loops, the runner is free
+  // to adjust `count` for tiled dimensions to minimize the number of launched
+  // tasks. Today we don't take advantage of this feature, and always launch the
+  // same number of tasks as in regular parallel loops.
 
   // This function implements a parallel version of a following loop:
   //
@@ -92,6 +99,9 @@ class ParallelLoopRunner {
   //     task(i, std::min(range - i, tile));
   void Parallelize(size_t range, size_t tile, Task1DTile1D task);
 
+  // Implements a parallel version of 1D loop with dynamic task count.
+  void ParallelizeDynamic(size_t range, size_t tile, Task1DTile1DDynamic task);
+
   // This function implements a parallel version of a following loop:
   //
   //   for (size_t i = 0; i < range_i; i++)
@@ -99,6 +109,10 @@ class ParallelLoopRunner {
   //       task(i, j, min(range_j - j, tile_j));
   void Parallelize(size_t range_i, size_t range_j, size_t tile_j,
                    Task2DTile1D task);
+
+  // Implements a parallel version of 2D loop with dynamic task count.
+  void ParallelizeDynamic(size_t range_i, size_t range_j, size_t tile_j,
+                          Task2DTile1DDynamic task);
 
   // This function implements a parallel version of a following loop:
   //
@@ -109,6 +123,11 @@ class ParallelLoopRunner {
   void Parallelize(size_t range_i, size_t range_j, size_t range_k,
                    size_t tile_j, size_t tile_k, Task3DTile2D task);
 
+  // Implements a parallel version of 3D loop with dynamic task count.
+  void ParallelizeDynamic(size_t range_i, size_t range_j, size_t range_k,
+                          size_t tile_j, size_t tile_k,
+                          Task3DTile2DDynamic task);
+
   // Resets the parallel loop runner `done_event` and returns the previous one
   // to the caller.
   tsl::AsyncValueRef<tsl::Chain> ResetDoneEvent();
@@ -118,7 +137,11 @@ class ParallelLoopRunner {
   const Eigen::ThreadPoolDevice* device() const { return device_; }
   void set_device(const Eigen::ThreadPoolDevice* device) { device_ = device; }
 
+  // Returns the number of threads in the underlying thread pool.
   size_t num_threads() const;
+
+  // Returns true if the current thread belongs to the underlying thread pool.
+  bool is_in_runner() const;
 
  private:
   // Forward declarations of the parallel tasks.
@@ -150,10 +173,6 @@ class ParallelLoopRunner {
   // pools for different NUMA nodes, and we have to be able to switch between
   // them from run to run.
   std::atomic<const Eigen::ThreadPoolDevice*> device_;
-
-  // The approximate amount of compute (in terms of wall time) that each
-  // persistent worker should handle.
-  std::optional<absl::Duration> worker_timeslice_;
 };
 
 }  // namespace xla::cpu

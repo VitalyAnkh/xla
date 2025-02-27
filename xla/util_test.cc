@@ -35,8 +35,8 @@ limitations under the License.
 #include "ml_dtypes/include/float8.h"
 #include "xla/hlo/testlib/test.h"
 #include "xla/maybe_owning.h"
+#include "xla/tsl/platform/logging.h"
 #include "xla/types.h"
-#include "tsl/platform/logging.h"
 #include "tsl/platform/ml_dtypes.h"
 
 namespace xla {
@@ -359,9 +359,9 @@ void PackInt4(absl::Span<const char> input, absl::Span<char> output) {
     // Mask out the high-order 4 bits in case they have extraneous data.
     char val = input[i] & 0xf;
     if (i % 2 == 0) {
-      output[i / 2] = val << 4;
+      output[i / 2] = val;
     } else {
-      output[i / 2] |= val;
+      output[i / 2] |= val << 4;
     }
   }
 }

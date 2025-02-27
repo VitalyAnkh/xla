@@ -26,8 +26,8 @@ limitations under the License.
 #include "xla/service/cpu/tests/cpu_codegen_test.h"
 #include "xla/shape_util.h"
 #include "xla/tests/test_utils.h"
+#include "xla/tsl/platform/test.h"
 #include "xla/xla_data.pb.h"
-#include "tsl/platform/test.h"
 
 namespace xla {
 namespace cpu {
@@ -65,9 +65,9 @@ class CpuEigenDotOperationTest
 };
 
 TEST_P(CpuEigenDotOperationTest, SimpleDotOp) {
-#if defined(INTEL_MKL) && defined(ENABLE_ONEDNN_V3)
+#if defined(INTEL_MKL)
   GTEST_SKIP() << "OneDNN rewrites dot instruction to custom-call.";
-#endif  // INTEL_MKL && ENABLE_ONEDNN_V3
+#endif  // INTEL_MKL
   HloComputation::Builder builder(TestName());
   DotTestSpec spec = GetParam();
 
@@ -83,9 +83,9 @@ TEST_P(CpuEigenDotOperationTest, SimpleDotOp) {
 }
 
 TEST_P(CpuEigenDotOperationTest, DotTransposeOp) {
-#if defined(INTEL_MKL) && defined(ENABLE_ONEDNN_V3)
+#if defined(INTEL_MKL)
   GTEST_SKIP() << "OneDNN rewrites dot instruction to custom-call.";
-#endif  // INTEL_MKL && ENABLE_ONEDNN_V3
+#endif  // INTEL_MKL
   HloComputation::Builder builder(TestName());
   DotTestSpec spec = GetParam();
 

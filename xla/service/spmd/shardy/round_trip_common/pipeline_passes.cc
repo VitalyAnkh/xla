@@ -20,7 +20,6 @@ limitations under the License.
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "mlir/Transforms/Passes.h"
 #include "stablehlo/transforms/Passes.h"
-#include "xla/mlir_hlo/mhlo/transforms/passes.h"
 #include "xla/mlir_hlo/stablehlo_ext/transforms/passes.h"
 #include "xla/service/spmd/shardy/round_trip_common/import_backend_func_calls.h"
 #include "xla/service/spmd/shardy/round_trip_common/import_constants.h"
@@ -32,7 +31,8 @@ namespace sdy {
 
 using ::mlir::func::FuncOp;
 
-void addCommonPreImportPasses(mlir::OpPassManager& pm) {
+void addCommonPreImportPasses(mlir::OpPassManager& pm,
+                              bool enableConstantImport) {
   pm.addPass(mlir::createSymbolDCEPass());
   // TODO(b/333505182): remove when partitioning is done in SDY.
   // We call prepare-for-export pass before SDY propagation, so that all IR
@@ -46,7 +46,9 @@ void addCommonPreImportPasses(mlir::OpPassManager& pm) {
   // Therefore, this pass needs to be applied after any StableHLO pass that
   // expects `stablehlo.constant`, and before any pass that has a greedy pattern
   // rewriter.
-  pm.addNestedPass<FuncOp>(createImportConstantsPass());
+  if (enableConstantImport) {
+    pm.addNestedPass<FuncOp>(createImportConstantsPass());
+  }
   pm.addNestedPass<FuncOp>(
       mlir::stablehlo_ext::createStablehloFlattenTuplePass());
   mlir::GreedyRewriteConfig config;

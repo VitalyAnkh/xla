@@ -32,6 +32,7 @@ limitations under the License.
 // IWYU pragma: no_include "llvm/Config/Disassemblers.def.inc"
 // IWYU pragma: no_include "llvm/Config/Targets.def.inc"
 
+#include "absl/cleanup/cleanup.h"
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
 #include "absl/log/check.h"
@@ -87,6 +88,7 @@ limitations under the License.
 #include "xla/backends/cpu/runtime/thunk.h"
 #include "xla/backends/cpu/runtime/thunk.pb.h"
 #include "xla/backends/cpu/runtime/thunk_proto_serdes.h"
+#include "xla/backends/cpu/transforms/xnn_graph_fusion.h"
 #include "xla/cpu_function_runtime.h"
 #include "xla/hlo/analysis/hlo_ordering.h"
 #include "xla/hlo/analysis/indexed_array_analysis.h"
@@ -138,7 +140,6 @@ limitations under the License.
 #include "xla/hlo/transforms/simplifiers/tuple_simplifier.h"
 #include "xla/hlo/transforms/simplifiers/zero_sized_hlo_elimination.h"
 #include "xla/hlo/transforms/while_loop_trip_count_annotator.h"
-#include "xla/hlo/translate/hlo_to_mhlo/hlo_to_mlir_hlo.h"
 #include "xla/literal.h"
 #include "xla/literal_pool.h"
 #include "xla/map_util.h"
@@ -226,7 +227,7 @@ limitations under the License.
 #include "llvm/TargetParser/X86TargetParser.h"
 #endif
 
-#if defined(INTEL_MKL) && defined(ENABLE_ONEDNN_V3)
+#if defined(INTEL_MKL)
 #include "xla/hlo/transforms/simplifiers/simplify_fp_conversions.h"
 #include "xla/service/cpu/cpu_float_support.h"
 #include "xla/service/cpu/onednn_contraction_rewriter.h"
@@ -248,8 +249,14 @@ static tsl::thread::ThreadPool* GetCompilationThreadPool() {
   // so much CPU-bound work. Based on profiling a few examples, 32 threads seems
   // to be enough to achieve maximum parallel compilation speedup.
   static constexpr int kMaxCompilationThreads = 32;
+
+  // On Mac OS the default stack size is 512KiB, this is too small for compiling
+  // reasonably sized programs
+  tsl::ThreadOptions thread_options;
+  thread_options.stack_size = 4 * 1024 * 1024;  // 4 MB
+
   static auto* thread_pool = new tsl::thread::ThreadPool(
-      tsl::Env::Default(), "xla-cpu-llvm-codegen",
+      tsl::Env::Default(), thread_options, "xla-cpu-llvm-codegen",
       std::min(kMaxCompilationThreads, tsl::port::MaxParallelism()));
   return thread_pool;
 }
@@ -553,7 +560,7 @@ absl::Status CpuCompiler::RunHloPassesThroughLayoutAssn(
   pipeline.AddPass<DotDecomposer>();
 
   // Rewrite to custom calls with target as oneDNN library calls.
-#if defined(INTEL_MKL) && defined(ENABLE_ONEDNN_V3)
+#if defined(INTEL_MKL)
   // AOT compiled code runs in single thread.
   bool is_thunk_runtime =
       module->config().debug_options().xla_cpu_use_thunk_runtime();
@@ -565,7 +572,7 @@ absl::Status CpuCompiler::RunHloPassesThroughLayoutAssn(
     // but in future plan to rename oneDNNrewriter to specific to onednn matmul
     pipeline.AddPass<OneDnnOpsRewriter>();
   }
-#endif  // INTEL_MKL && ENABLE_ONEDNN_V3
+#endif  // INTEL_MKL
 
   // Promote BF16 all-reduce to F32.
   const std::pair<PrimitiveType, PrimitiveType> ar_promoted_types[] = {
@@ -575,7 +582,7 @@ absl::Status CpuCompiler::RunHloPassesThroughLayoutAssn(
   // backend can support BF16/F8 operations without directly implementing a
   // BF16/F8 lowering for most ops.
   FloatSupport bf16_support(BF16);
-#if defined(INTEL_MKL) && defined(ENABLE_ONEDNN_V3)
+#if defined(INTEL_MKL)
   CpuFloatSupport onednn_bf16_support(BF16);
   if (!is_aot_compile && !is_thunk_runtime) {
     pipeline.AddPass<FloatNormalization>(&onednn_bf16_support);
@@ -656,8 +663,7 @@ absl::Status CpuCompiler::RunHloPassesThroughLayoutAssn(
   dynamic_padder_options.shape_check_mode =
       DynamicDimensionInference::ShapeCheckMode::kIgnore;
   pipeline.AddPass<DynamicPadder>(dynamic_padder_options);
-  pipeline.AddPass<SelectAndScatterExpander>();
-  pipeline.AddPass<ScatterExpander>(ScatterExpander::kEliminateAllScatters);
+
   pipeline.AddPass<ConvCanonicalization>(target_machine_features);
 
   // Run fp16 dots/convs in fp32 and then downcast the result to fp16.
@@ -674,8 +680,8 @@ absl::Status CpuCompiler::RunHloPassesThroughLayoutAssn(
   }
 
   // Run the following passes to a fixed point.
-  [&pipeline =
-       pipeline.AddPass<HloPassFix<HloPassPipeline>>("simplification")] {
+  [&pipeline = pipeline.AddPass<HloPassFix<HloPassPipeline>>("simplification"),
+   module] {
     AddHloVerifier(&pipeline, HloVerifierOpts{},
                    /*debug_only=*/true);
 
@@ -708,9 +714,16 @@ absl::Status CpuCompiler::RunHloPassesThroughLayoutAssn(
 
     pipeline.AddPass<HloDCE>();
     pipeline.AddPass<ReshapeMover>();
-    pipeline.AddPass<HloConstantFolding>();
+    pipeline.AddPass<HloConstantFolding>(
+        options::FoldAllConstants(module->config())
+            ? HloConstantFolding::Level::kAgressive
+            : HloConstantFolding::Level::kDefault);
     pipeline.AddPass<ConditionalSimplifier>();
   }();
+
+  pipeline.AddPass<SelectAndScatterExpander>();
+  pipeline.AddPass<ScatterExpander>(ScatterExpander::kEliminateAllScatters);
+
   pipeline.AddPass<BitcastDtypesExpander>();
 
   pipeline.AddPass<TopkRewriter>([](const HloSortInstruction* sort, int64_t) {
@@ -781,7 +794,7 @@ absl::Status CpuCompiler::RunHloPassesAfterLayoutAssn(
           ? module->config().intra_op_parallelism_threads()
           : tsl::port::NumSchedulableCPUs();
 
-#if defined(INTEL_MKL) && defined(ENABLE_ONEDNN_V3)
+#if defined(INTEL_MKL)
   auto& debug_options = module->config().debug_options();
   bool is_thunk_runtime = debug_options.xla_cpu_use_thunk_runtime();
 
@@ -802,7 +815,14 @@ absl::Status CpuCompiler::RunHloPassesAfterLayoutAssn(
       pipeline.AddPass<SimplifyFPConversions>();
     }
   }
-#endif  // INTEL_MKL && ENABLE_ONEDNN_V3
+#endif  // INTEL_MKL
+
+  if (module->config()
+          .debug_options()
+          .xla_cpu_experimental_xnn_graph_fusion_mode() !=
+      DebugOptions::XNN_GRAPH_FUSION_MODE_DISABLED) {
+    pipeline.AddPass<XnnGraphFusion>();
+  }
 
   // Add a fusion pass now that layout assignment is done.
   pipeline.AddPass<CpuInstructionFusion>();
@@ -888,21 +908,6 @@ llvm::TargetOptions CompilerTargetOptions(
   // Always allow FMA fusion. This increases precision instead of decreasing it.
   target_options.AllowFPOpFusion = llvm::FPOpFusion::Fast;
   return target_options;
-}
-
-llvm::CodeGenOptLevel CodeGenOptLevel(const HloModuleConfig& module_config) {
-  VLOG(2) << "backend_optimization_level: "
-          << module_config.debug_options().xla_backend_optimization_level();
-  switch (module_config.debug_options().xla_backend_optimization_level()) {
-    case 1:
-      return llvm::CodeGenOptLevel::Less;
-    case 2:
-      return llvm::CodeGenOptLevel::Default;
-    case 3:
-      return llvm::CodeGenOptLevel::Aggressive;
-    default:
-      return llvm::CodeGenOptLevel::None;
-  }
 }
 
 std::pair<LLVMCompiler::ModuleHook, LLVMCompiler::ModuleHook> GetIRModuleHooks(
@@ -999,7 +1004,7 @@ absl::StatusOr<std::unique_ptr<HloModule>> CpuCompiler::RunHloPasses(
   TF_ASSIGN_OR_RETURN(
       std::unique_ptr<llvm::TargetMachine> jit_target_machine,
       JitCompiler::InferTargetMachine(
-          CompilerTargetOptions(config), CodeGenOptLevel(config),
+          CompilerTargetOptions(config), IrCompiler::GetCodeGenOptLevel(config),
           CpuFeatureFromString(config.debug_options().xla_cpu_max_isa())));
 
   TF_RETURN_IF_ERROR(RunHloPasses(module.get(), /*is_aot_compile=*/false,
@@ -1009,6 +1014,26 @@ absl::StatusOr<std::unique_ptr<HloModule>> CpuCompiler::RunHloPasses(
 }
 
 namespace {
+
+static void DumpModuleToFile(const llvm::Module& llvm_module,
+                             const llvm::object::ObjectFile& obj_file,
+                             const HloModule& hlo_module) {
+  absl::string_view id = llvm_module.getModuleIdentifier();
+  size_t pos = std::min(id.size(), 1 + kXlaModuleIdentifier.size());
+  auto get_file_suffix = [&]() {
+    std::vector<absl::string_view> parts = {"obj-file"};
+    parts.reserve(3);
+    absl::string_view middle_name = id.substr(pos);
+    if (!middle_name.empty()) {
+      parts.push_back(middle_name);
+    }
+    parts.push_back("o");
+    return absl::StrJoin(parts, ".");
+  };
+  DumpToFileInDir(
+      hlo_module, /*file_prefix=*/"", get_file_suffix(),
+      absl::string_view(obj_file.getData().data(), obj_file.getData().size()));
+}
 
 // Post-compilation callback functor for use by SimpleOrcJIT.
 //
@@ -1021,13 +1046,7 @@ CreateOrcJITPostCompilationHook(const HloModule* hlo_module,
     if (obj_files) obj_files->push_back(obj_file.getData().str());
 
     if (DumpingEnabledForHloModule(*hlo_module)) {
-      std::string_view id = llvm_module.getModuleIdentifier();
-      size_t pos = std::min(id.size(), 1 + kXlaModuleIdentifier.size());
-      DumpToFileInDir(
-          *hlo_module, /*file_prefix=*/"",
-          /*file_suffix=*/absl::StrCat("obj-file.", id.substr(pos), ".o"),
-          absl::string_view(obj_file.getData().data(),
-                            obj_file.getData().size()));
+      DumpModuleToFile(llvm_module, obj_file, *hlo_module);
     }
   };
 }
@@ -1363,13 +1382,13 @@ CpuCompiler::CompileCpuExecutable(std::unique_ptr<HloModule> module) {
 
   // Options for compiling LLVM IR to machine code.
   IrCompiler::Options ir_compiler_options{
-      /*optimization_level=*/CodeGenOptLevel(config),
+      /*optimization_level=*/IrCompiler::GetCodeGenOptLevel(config),
       /*optimize_for_size=*/options::OptimizeForSizeRequested(config),
       /*fast_math_flags=*/llvm_ir::GetCpuFastMathFlags(config),
       /*disable_expensive_passes=*/
       debug_options.xla_llvm_disable_expensive_passes(),
       /*slp_vectorizer_disabled=*/options::SlpVectorizerDisabled(config),
-      /*enable_loop_unrolling=*/options::EnableLoopUnrolling(config),
+      /*disable_loop_unrolling=*/options::DisableLoopUnrolling(config),
   };
 
   // Compiler hooks to intercept compiled LLVM IR modules.
@@ -1825,7 +1844,8 @@ CpuCompiler::CompileAheadOfTime(std::unique_ptr<HloModuleGroup> module_group,
       pie_level = llvm::PIELevel::Large;
       break;
   }
-  llvm::CodeGenOptLevel opt_level = CodeGenOptLevel(modules[0]->config());
+  llvm::CodeGenOptLevel opt_level =
+      IrCompiler::GetCodeGenOptLevel(modules[0]->config());
   std::shared_ptr<llvm::TargetMachine> target_machine =
       absl::WrapUnique(target->createTargetMachine(
           triple.getTriple(), options.cpu_name(), options.features(),
@@ -1842,6 +1862,19 @@ CpuCompiler::CompileAheadOfTime(std::unique_ptr<HloModuleGroup> module_group,
     VLOG(1) << "Compiling ahead-of-time: " << module->name();
 
     if (!module->has_schedule()) {
+      const bool is_thunk_runtime =
+          module->config().debug_options().xla_cpu_use_thunk_runtime();
+      // AOT compilation is incompatible with thunks; temporarily disable them.
+      if (is_thunk_runtime) {
+        module->mutable_config()
+            .mutable_debug_options()
+            .set_xla_cpu_use_thunk_runtime(false);
+      }
+      absl::Cleanup restore_thunk_runtime_value = [&] {
+        module->mutable_config()
+            .mutable_debug_options()
+            .set_xla_cpu_use_thunk_runtime(is_thunk_runtime);
+      };
       TF_RETURN_IF_ERROR(RunHloPasses(module, /*is_aot_compile=*/true,
                                       target_machine.get(),
                                       /*dummy*/ CompileOptions{}));
@@ -1952,13 +1985,7 @@ CpuCompiler::CompileAheadOfTime(std::unique_ptr<HloModuleGroup> module_group,
         if (!DumpingEnabledForHloModule(*module)) {
           return;
         }
-        std::string_view id = llvm_module.getModuleIdentifier();
-        size_t pos = std::min(id.size(), 1 + kXlaModuleIdentifier.size());
-        DumpToFileInDir(
-            *module, /*file_prefix=*/"",
-            /*file_suffix=*/absl::StrCat("obj-file.", id.substr(pos), ".o"),
-            absl::string_view(obj_file.getData().data(),
-                              obj_file.getData().size()));
+        DumpModuleToFile(llvm_module, obj_file, *module);
       };
 
       IrCompiler::Options ir_compiler_options = {
@@ -1970,8 +1997,8 @@ CpuCompiler::CompileAheadOfTime(std::unique_ptr<HloModuleGroup> module_group,
           module->config().debug_options().xla_llvm_disable_expensive_passes(),
           /*disable_slp_vectorizer=*/
           options::SlpVectorizerDisabled(module->config()),
-          /*enable_loop_unrolling=*/
-          options::EnableLoopUnrolling(module->config()),
+          /*disable_loop_unrolling=*/
+          options::DisableLoopUnrolling(module->config()),
           /*dfsan_enabled=*/aot_options.sanitize_dataflow(),
           /*dfsan_abilists_enabled=*/aot_options.sanitize_abilists_dataflow()};
 
@@ -2130,7 +2157,7 @@ CpuExecutableAotCompilationResult::LoadExecutable(
   IrCompiler::TargetMachineBuilder target_machine_builder =
       JitCompiler::InferTargetMachineBuilder(
           std::move(CompilerTargetOptions(module->config())),
-          CodeGenOptLevel(config),
+          IrCompiler::GetCodeGenOptLevel(config),
           CpuFeatureFromString(debug_options.xla_cpu_max_isa()));
   TF_ASSIGN_OR_RETURN(auto target_machine, target_machine_builder());
 

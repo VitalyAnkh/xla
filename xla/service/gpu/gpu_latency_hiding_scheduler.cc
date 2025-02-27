@@ -30,8 +30,10 @@ limitations under the License.
 #include "xla/hlo/ir/hlo_opcode.h"
 #include "xla/hlo/utils/hlo_query.h"
 #include "xla/service/collective_ops_utils.h"
+#include "xla/service/collective_permute_decomposer.h"
 #include "xla/service/gpu/backend_configs.pb.h"
 #include "xla/service/gpu/cublas_cudnn.h"
+#include "xla/service/gpu/transforms/collectives/collective_ops_utils.h"
 #include "xla/service/latency_hiding_scheduler.h"
 #include "xla/shape.h"
 #include "xla/shape_util.h"
@@ -99,6 +101,7 @@ std::pair<GpuResourceType, ResourceUsageType> GetP2PResourceAndUsage(
                    ? GpuResourceType::kGpuAsyncStreamSend1
                    : GpuResourceType::kGpuAsyncStreamRecv1;
   }
+
   return {resource, usage};
 }
 
@@ -109,7 +112,7 @@ std::pair<GpuResourceType, ResourceUsageType> GetP2PResourceAndUsage(
 bool IsGpuAsyncStart(const HloInstruction& hlo) {
   return (hlo_query::IsAsyncCollectiveStartOp(&hlo,
                                               /*include_send_recv=*/true) &&
-          !IsSyncCollective(&hlo)) ||
+          !IsGPUSyncCollective(hlo)) ||
          IsAsyncComputeOp(hlo) || hlo.opcode() == HloOpcode::kCopyStart;
 }
 
@@ -117,7 +120,7 @@ bool IsGpuAsyncStart(const HloInstruction& hlo) {
 bool IsGpuAsyncDone(const HloInstruction& hlo) {
   return (hlo_query::IsAsyncCollectiveDoneOp(&hlo,
                                              /*include_send_recv=*/true) &&
-          !IsSyncCollective(hlo.operand(0))) ||
+          !IsGPUSyncCollective(*hlo.operand(0))) ||
          IsAsyncComputeOp(hlo) || hlo.opcode() == HloOpcode::kCopyDone;
 }
 
@@ -188,6 +191,7 @@ bool GpuScheduleCrossesOverlapLimit(
     const int64_t num_resources_needed =
         sched_state.async_tracker->GetNumResourcesPerInstruction(
             resource, node->GetInstr());
+
     if (limit < num_resources_needed) {
       return true;
     }
@@ -237,9 +241,9 @@ bool GpuScheduleCrossesOverlapLimit(
   return false;
 }
 
-//===--------------------------------------------------------------------===//
+//===----------------------------------------------------------------------===//
 // GpuAsyncTrackerBase
-//===--------------------------------------------------------------------===//
+//===----------------------------------------------------------------------===//
 GpuAsyncTrackerBase::GpuAsyncTrackerBase(const SchedulerConfig& config,
                                          GetCanonicalAsyncOpFunc func)
     : AsyncTracker(config, func) {}
@@ -319,11 +323,23 @@ void GpuAsyncTrackerBase::PostProcessScheduleGraph(
   }
 }
 
-//===--------------------------------------------------------------------===//
+//===----------------------------------------------------------------------===//
 // GpuAsyncTracker
-//===--------------------------------------------------------------------===//
+//===----------------------------------------------------------------------===//
 GpuAsyncTracker::GpuAsyncTracker(const SchedulerConfig& config)
     : GpuAsyncTrackerBase(config) {}
+
+static bool IsAnnotatedForGpuAsyncStreamCollectivesP2P(
+    const HloInstruction& instr) {
+  const HloInstruction& start_instr =
+      GpuGetCanonicalAsyncOp(instr).outer == HloOpcode::kAsyncDone
+          ? *instr.operand(0)
+          : instr;
+  auto it =
+      start_instr.frontend_attributes().map().find(kCollectiveStreamAttrName);
+  if (it == start_instr.frontend_attributes().map().end()) return false;
+  return it->second == kCollectiveStreamP2P;
+}
 
 ResourcesVector GpuAsyncTracker::GetResourcesFromInstructionImpl(
     const HloInstruction& instr) const {
@@ -331,7 +347,13 @@ ResourcesVector GpuAsyncTracker::GetResourcesFromInstructionImpl(
   if (op.outer == HloOpcode::kAsyncStart || op.outer == HloOpcode::kAsyncDone) {
     ResourceUsageType usage;
     GpuResourceType resource;
-    if (op.inner == HloOpcode::kSend || op.inner == HloOpcode::kRecv) {
+
+    if (IsAnnotatedForGpuAsyncStreamCollectivesP2P(instr)) {
+      resource = GpuResourceType::kGpuAsyncStreamCollectivesP2P;
+      usage = op.outer == HloOpcode::kAsyncStart
+                  ? ResourceUsageType::kResourceRelease
+                  : ResourceUsageType::kResourceOccupy;
+    } else if (op.inner == HloOpcode::kSend || op.inner == HloOpcode::kRecv) {
       std::tie(resource, usage) = GetP2PResourceAndUsage(instr, op);
     } else {
       usage = op.outer == HloOpcode::kAsyncStart
@@ -394,6 +416,8 @@ absl::string_view GpuAsyncTracker::GetResourceName(
     return GpuAsyncTrackerBase::GetResourceName(resource_type);
   }
   switch (static_cast<GpuResourceType>(resource_type)) {
+    case GpuResourceType::kGpuAsyncStreamCollectivesP2P:
+      return "kGpuAsyncStreamCollectivesP2P";
     case GpuResourceType::kGpuAsyncStreamSend0:
       return "kGpuAsyncStreamSend0";
     case GpuResourceType::kGpuAsyncStreamSend1:
@@ -427,9 +451,11 @@ int64_t GpuAsyncTracker::GetNumResourcesPerInstruction(
            ResourceTypeToIndex(GpuResourceType::kGpuResourceTypeEnd));
   int64_t num_resources =
       GpuAsyncTrackerBase::GetNumResourcesPerInstruction(resource_type, instr);
+
   if (num_resources <= 0 || instr.opcode() != HloOpcode::kWhile) {
     return num_resources;
   }
+
   // For while-loop with pipelined Send/Recv, the while-body first releases
   // the Send/Recv resource and then uses the resource. Therefore, subtract 1
   // from num_resources for the relevant resource type.
@@ -468,9 +494,9 @@ int64_t GpuAsyncTracker::GetNumResourcesPerInstruction(
   return num_resources - (found ? 1 : 0);
 }
 
-//===--------------------------------------------------------------------===//
+//===----------------------------------------------------------------------===//
 // GpuLatencyEstimator
-//===--------------------------------------------------------------------===//
+//===----------------------------------------------------------------------===//
 GpuLatencyEstimator::GpuLatencyEstimator(int64_t pointer_size,
                                          GetCanonicalAsyncOpFunc func)
     : ApproximateLatencyEstimator(func), pointer_size_(pointer_size) {}
@@ -529,9 +555,9 @@ ApproximateLatencyEstimator::TimeCost GpuLatencyEstimator::GetLatencyBetween(
   return ApproximateLatencyEstimator::kLowLatency;
 }
 
-//===--------------------------------------------------------------------===//
+//===----------------------------------------------------------------------===//
 // GPUProfileStatisticsAggregator
-//===--------------------------------------------------------------------===//
+//===----------------------------------------------------------------------===//
 
 void GPUProfileStatisticsAggregator::HandleMissingInstructionCost(
     const HloInstruction& instruction) {

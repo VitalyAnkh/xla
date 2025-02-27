@@ -40,8 +40,6 @@ limitations under the License.
 #include "xla/shape.h"
 #include "xla/xla.pb.h"
 #include "xla/xla_data.pb.h"
-#include "tsl/platform/logging.h"
-#include "tsl/platform/statusor.h"
 #include "tsl/profiler/lib/profiler_session.h"
 #include "tsl/profiler/protobuf/xplane.pb.h"
 
@@ -64,6 +62,12 @@ enum class InputFormat {
                                     // format. Can be dumped by TensorFlow by
                                     // setting the flag xla_dump_hlo_snapshots
                                     // in conjunction with xla_dump_as_text.
+};
+
+enum class OutputFormat : std::uint8_t {
+  kText,         // Text format returned by Literal::ToString().
+  kProtoBinary,  // Protobuf binary format of an xla::LiteralProto message.
+  kProtoText,    // Protobuf text format of an xla::LiteralProto message.
 };
 
 // Interface for profiler plugins. If being set in RunningOptions, profiling
@@ -133,6 +137,10 @@ class GPURunnerProfiler : public XSpaceProfilerInterface {
 bool AbslParseFlag(absl::string_view text, InputFormat* input_format,
                    std::string* error);
 std::string AbslUnparseFlag(InputFormat input_format);
+
+bool AbslParseFlag(absl::string_view text, OutputFormat* output_format,
+                   std::string* error);
+std::string AbslUnparseFlag(OutputFormat output_format);
 
 // FunctionalHloRunner takes an HLO module as input and runs the HLO module
 // on a single or multiple hosts with various options (e.g. SPMD). The HLO
@@ -346,7 +354,8 @@ class FunctionalHloRunner {
       const PreprocessingOptions& preproc_options,
       const CompileOptions& compile_options,
       const RunningOptions& running_options, absl::string_view hlo_text,
-      InputFormat input_format, const PerDeviceLiteralVecType& arguments = {});
+      InputFormat input_format, const PerDeviceLiteralVecType& arguments = {},
+      std::minstd_rand0* engine = nullptr);
 
   // Loads and compiles an HLO for debugging purposes.
   //
@@ -368,7 +377,8 @@ class FunctionalHloRunner {
       const PreprocessingOptions& preproc_options,
       const CompileOptions& compile_options,
       const RunningOptions& running_options, HloModule* hlo_module,
-      const PerDeviceLiteralVecType& arguments = {});
+      const PerDeviceLiteralVecType& arguments = {},
+      std::minstd_rand0* engine = nullptr);
 
   // Compiles the HLO module.
   static absl::StatusOr<std::unique_ptr<PjRtLoadedExecutable>> Compile(
@@ -394,28 +404,8 @@ class FunctionalHloRunner {
       const RunningOptions& running_options,
       std::minstd_rand0* engine = nullptr);
 
-  static absl::StatusOr<std::unique_ptr<HloModule>> ReadModuleFromHloTextFile(
-      absl::string_view hlo_file);
-  static absl::StatusOr<std::unique_ptr<HloModule>>
-  ReadModuleFromBinaryProtoFile(absl::string_view hlo_file);
-  static absl::StatusOr<std::unique_ptr<HloModule>> ReadModuleFromTextProtoFile(
-      absl::string_view hlo_file);
-
-  static absl::StatusOr<HloModuleAndArguments>
-  ReadModuleFromSnapshotBinaryProtoFile(absl::string_view hlo_file);
-  static absl::StatusOr<HloModuleAndArguments>
-  ReadModuleFromUnoptimizedSnapshotBinaryProtoFile(absl::string_view hlo_file);
-  static absl::StatusOr<HloModuleAndArguments>
-  ReadModuleFromUnoptimizedSnapshotTextProtoFile(absl::string_view hlo_file);
-
   static absl::StatusOr<HloModuleAndArguments> LoadHloModuleAndArguments(
       absl::string_view hlo_file, InputFormat input_format);
-
-  static absl::StatusOr<std::unique_ptr<HloModule>> ReadModuleFromString(
-      absl::string_view hlo_text);
-
-  static absl::StatusOr<std::unique_ptr<HloModule>> ReadModuleFromProto(
-      const HloModuleProto& proto);
 
   // This would ideally be private, but we need it for the implementation of
   // MultihostHloRunner.
@@ -429,7 +419,8 @@ class FunctionalHloRunner {
 
   static absl::Status DumpOutput(
       const FunctionalHloRunner::PerDeviceLiteralVecType& output,
-      absl::string_view dump_output_to, int task_id);
+      absl::string_view dump_output_to, int task_id,
+      OutputFormat output_format = OutputFormat::kText);
 
  private:
   // Calculates the requested number of replicas and partitions.
