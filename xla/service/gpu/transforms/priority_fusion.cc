@@ -531,6 +531,12 @@ class PriorityFusionQueue {
   // Returns the priority of the producer based on its current operands and
   // users.
   Priority CalculateProducerPriority(HloInstruction* producer) {
+    // First cleanup any potentially remaining preferred consumer. We will
+    // recompute it here.
+    {
+      absl::MutexLock lock(&preferred_consumer_mutex_);
+      preferred_consumer_.erase(producer);
+    }
     // Bitcasts should always be fused first, since they are no-ops.
     if (HloPredicateIsOp<HloOpcode::kBitcast>(producer)) {
       return absl::InfiniteDuration();
@@ -694,6 +700,15 @@ class PriorityFusionQueue {
 
     if (auto fusion_decision = IsTritonSupported(*consumer); !fusion_decision) {
       return fusion_decision;
+    }
+
+    // Avoid cases where we'd create a fusion that hit limitations in ptxas
+    // regarding the maximum number of parameters that can be passed to a
+    // kernel.
+    if (auto fits_budget = FusionFitsInParameterLimit(
+            *consumer, *producer, /*is_consumer_producer_fusion=*/true);
+        !fits_budget) {
+      return fits_budget;
     }
 
     TiledRunTimeDataOrError tiled_run_time_data_or_error =
