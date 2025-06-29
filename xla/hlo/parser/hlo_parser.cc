@@ -581,8 +581,10 @@ class HloParserImpl : public HloParser {
   bool ParseDouble(double* result);
   bool ParseComplex(std::complex<double>* result);
   bool ParseBool(bool* result);
-  bool ParseToken(TokKind kind, const std::string& msg);
+  bool ParseToken(TokKind kind, const std::string& msg,
+                  uint64_t lexer_skip_mask = kNoneMask);
   bool ParseUnsignedIntegerType(PrimitiveType* primitive_type);
+  bool ParseOriginalArray(OriginalArray& original_array);
   bool ParseOriginalValue(std::shared_ptr<OriginalValue>& original_value);
 
   using AliasingData =
@@ -1227,6 +1229,7 @@ bool HloParserImpl::ParseHloModule(HloModule* module,
     }
     module->buffer_donor_config() = buffer_donor_config;
   }
+  DeduplicateOriginalValues(module);
 
   return true;
 }
@@ -4495,7 +4498,7 @@ bool HloParserImpl::ParseTupleLiteral(Literal* literal, const Shape& shape) {
 //   ::= rank2345
 // rank2345 ::= shape nested_array
 bool HloParserImpl::ParseNonTupleLiteral(Literal* literal, const Shape& shape) {
-  CHECK(LayoutUtil::IsDenseArray(shape)) << shape.ToString(true);
+  CHECK(shape.IsArray()) << shape.ToString(true);
   return ParseDenseLiteral(literal, shape);
 }
 
@@ -5818,15 +5821,37 @@ bool HloParserImpl::ParseShapeList(std::vector<Shape>* result) {
 bool HloParserImpl::ParseInt64List(const TokKind start, const TokKind end,
                                    const TokKind delim,
                                    std::vector<int64_t>* result) {
-  auto parse_and_add_item = [&]() {
-    int64_t i;
-    if (!ParseInt64(&i)) {
-      return false;
+  // Next token can be `end` or an int64. So, we pass skip_mask hint to the
+  // lexer to avoid parsing unnecessary expensive patterns.
+  if (!ParseToken(start,
+                  StrCat("expects a list to end with ", TokKindToString(end)),
+                  /*lexer_skip_mask=*/kDimLabelsDxDPadDecimalMask)) {
+    return false;
+  }
+  if (lexer_.GetKind() == end) {
+    // empty
+  } else {
+    while (true) {
+      int64_t i;
+      // The next token must be a `delim` or the `end` token, both of which are
+      // small and lexing it fast. So, we don't pass any skip hint to the lexer.
+      if (!ParseInt64(&i)) {
+        return false;
+      }
+      result->push_back(i);
+      if (lexer_.GetKind() != delim) {
+        break;
+      }
+      // The next token must be an int64. Otherwise, it would be a parsing
+      // error. So, we pass skip_mask hint to the lexer to avoid parsing
+      // unnecessary expensive patterns.
+      lexer_.Lex(/*skip_mask=*/kDimLabelsDxDPadDecimalMask);
     }
-    result->push_back(i);
-    return true;
-  };
-  return ParseList(start, end, delim, parse_and_add_item);
+  }
+  // After the `end` token, we don't have any idea on the next token. So, we
+  // don't pass any skip_mask hint to the lexer.
+  return ParseToken(
+      end, StrCat("expects a list to end with ", TokKindToString(end)));
 }
 
 // int64_tlistlist ::= start int64_tlist_elements end
@@ -6491,8 +6516,32 @@ bool HloParserImpl::ParsePaddingConfig(PaddingConfig* padding) {
   return true;
 }
 
-// original_tensor ::= '{' instruction_name [shape_index] '}'
-// original_value ::= '{' '('* original_tensor [','] ')'* | original_value '}'
+// original_array ::= '{' instruction_name [shape_index] '}'
+bool HloParserImpl::ParseOriginalArray(OriginalArray& original_array) {
+  VLOG(kDebugLevel) << "ParseOriginalArray";
+
+  if (!ParseToken(TokKind::kLbrace, "Expects '{'")) {
+    return false;
+  }
+
+  if (lexer_.GetKind() == TokKind::kString) {
+    if (!ParseString(&original_array.instruction_name)) {
+      return false;
+    }
+    if (lexer_.GetKind() == TokKind::kLbrace) {
+      if (!ParseShapeIndex(&original_array.shape_index)) {
+        return false;
+      }
+    }
+  }
+
+  if (!ParseToken(TokKind::kRbrace, "Expects '} at end of OriginalArray'")) {
+    return false;
+  }
+  return true;
+}
+
+// original_value ::= '{' '('* original_array [','] ')'* | original_value '}'
 bool HloParserImpl::ParseOriginalValue(
     std::shared_ptr<OriginalValue>& original_value) {
   VLOG(kDebugLevel) << "ParseOriginalValue";
@@ -6513,29 +6562,17 @@ bool HloParserImpl::ParseOriginalValue(
       lexer_.Lex();
       ++leaf_shape_index.back();
     } else if (lexer_.GetKind() == TokKind::kLbrace) {
-      lexer_.Lex();
-      if (lexer_.GetKind() != TokKind::kRbrace) {
-        std::string instruction_name;
-        ShapeIndex shape_index;
-        if (!ParseString(&instruction_name)) {
-          return false;
-        }
-        if (lexer_.GetKind() != TokKind::kRbrace) {
-          if (!ParseShapeIndex(&shape_index)) {
-            return false;
-          }
-        }
-        *original_value->mutable_element(leaf_shape_index) = {instruction_name,
-                                                              shape_index};
+      OriginalArray original_array;
+      if (!ParseOriginalArray(original_array)) {
+        return false;
+      }
+      if (!original_array.instruction_name.empty()) {
+        *original_value->mutable_element(leaf_shape_index) = original_array;
       } else {
         // The original value is not expected to have any leaf without values.
         // However we should not fail the execution here. This should
         // be done in HloVerifier instead.
         LOG(WARNING) << "Found an empty leaf node in an original value";
-      }
-      if (!ParseToken(TokKind::kRbrace,
-                      "Expects '} at end of each OriginalTensor'")) {
-        return false;
       }
     } else {
       return false;
@@ -7019,12 +7056,13 @@ bool HloParserImpl::ParseBool(bool* result) {
   return true;
 }
 
-bool HloParserImpl::ParseToken(TokKind kind, const std::string& msg) {
+bool HloParserImpl::ParseToken(TokKind kind, const std::string& msg,
+                               uint64_t lexer_skip_mask) {
   VLOG(kDebugLevel) << "ParseToken " << TokKindToString(kind) << " " << msg;
   if (lexer_.GetKind() != kind) {
     return TokenError(msg);
   }
-  lexer_.Lex();
+  lexer_.Lex(/*skip_mask=*/lexer_skip_mask);
   return true;
 }
 

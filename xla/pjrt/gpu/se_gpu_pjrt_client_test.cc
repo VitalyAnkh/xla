@@ -1228,11 +1228,18 @@ TEST(StreamExecutorGpuClientTest, GetDeviceFabricInfo) {
                 ->local_device_state();
         if (local_device_state != nullptr) {
           se::StreamExecutor* executor = local_device_state->executor();
-          if (std::stoi(MakeComputeCapabilityString(
-                  &executor->GetDeviceDescription())) == 9) {
-            auto fabric_info = GetDeviceFabricInfo(executor->device_ordinal());
-            if (fabric_info.ok()) {
-              ADD_FAILURE();
+          if (auto* cc = std::get_if<se::CudaComputeCapability>(
+                  &executor->GetDeviceDescription().gpu_compute_capability())) {
+            if (cc->IsAtLeastHopper()) {
+              TF_ASSERT_OK_AND_ASSIGN(
+                  std::string fabric_info,
+                  GetDeviceFabricInfo(executor->device_ordinal()));
+              // Hopper devices have empty fabric info, MNNVL Blackwell devices
+              // have meaningful fabric info.
+              if (cc->IsHopper()) {
+                EXPECT_EQ(fabric_info,
+                          "00000000-0000-0000-0000-000000000000/0");
+              }
             }
           }
         }
@@ -1296,7 +1303,7 @@ TEST(StreamExecutorGpuClientTest, GetTopologyDescriptionWithGlobalDevicesTest) {
   }
 }
 
-TEST(TfrtCpuClientTest, CopyToMemorySpace) {
+TEST(PjRtCpuClientTest, CopyToMemorySpace) {
   TF_ASSERT_OK_AND_ASSIGN(auto client,
                           GetStreamExecutorGpuClient(DefaultOptions()));
   for (auto* memory_space : client->memory_spaces()) {
@@ -1702,6 +1709,7 @@ TEST(StreamExecutorGpuClientTest, ExecutePinnedHostOutputTest) {
       auto memory_stats, executable->GetExecutable()->GetCompiledMemoryStats());
   EXPECT_EQ(memory_stats.output_size_in_bytes, 0);
   EXPECT_EQ(memory_stats.host_output_size_in_bytes, 16);
+  EXPECT_GE(memory_stats.peak_memory_in_bytes, 0);
 }
 
 TEST(StreamExecutorGpuClientTest, ExecutePinnedHostOutputTupleTest) {

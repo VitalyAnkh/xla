@@ -67,6 +67,200 @@ using hlo_sharding_util::DeviceGroupTileAssignment;
 using hlo_sharding_util::GroupedSharding;
 }  // namespace
 
+Window GenNewWindow(const HloInstruction* original_dot,
+                    const HloInstruction* dot_lhs,
+                    const HloInstruction* dot_rhs, int64_t lhs_concat_dim,
+                    int64_t rhs_concat_dim, bool windowed_at_contracting_dims,
+                    bool windowed_at_batch_dims) {
+  auto new_window = original_dot->window();
+  const ConvolutionDimensionNumbers& conv_dnums =
+      original_dot->convolution_dimension_numbers();
+  if (lhs_concat_dim != -1) {
+    for (int64_t i = 0; i < conv_dnums.input_spatial_dimensions_size(); ++i) {
+      if (conv_dnums.input_spatial_dimensions(i) == lhs_concat_dim) {
+        auto wd = new_window.mutable_dimensions(i);
+        auto lhs_size = dot_lhs->shape().dimensions(lhs_concat_dim + 1);
+        if (windowed_at_contracting_dims) {
+          wd->set_size(lhs_size);
+        }
+        if (windowed_at_batch_dims) {
+          wd->set_size(lhs_size);
+          wd->set_padding_low(0);
+          wd->set_padding_high(0);
+          wd->set_stride(std::max<int64_t>(1, lhs_size - 1));
+          wd->set_window_dilation(1);
+          wd->set_base_dilation(lhs_size);
+          wd->set_window_reversal(false);
+        }
+      }
+    }
+  }
+  if (rhs_concat_dim != -1) {
+    for (int64_t i = 0; i < conv_dnums.kernel_spatial_dimensions_size(); ++i) {
+      if (conv_dnums.kernel_spatial_dimensions(i) == rhs_concat_dim &&
+          !windowed_at_contracting_dims && !windowed_at_batch_dims &&
+          lhs_concat_dim == -1) {
+        auto wd = new_window.mutable_dimensions(i);
+        auto rhs_size = dot_rhs->shape().dimensions(rhs_concat_dim + 1);
+        wd->set_size(rhs_size);
+        wd->set_padding_low(rhs_size - 1);
+        wd->set_padding_high(rhs_size - 1);
+      }
+    }
+  }
+  // Add the extra dimension to window.
+  WindowDimension* new_dim = new_window.add_dimensions();
+  if (windowed_at_contracting_dims) {
+    new_dim->set_size(2);
+    new_dim->set_padding_low(0);
+    new_dim->set_padding_high(0);
+    new_dim->set_stride(1);
+    new_dim->set_window_dilation(1);
+    new_dim->set_base_dilation(1);
+    new_dim->set_window_reversal(false);
+  } else if (windowed_at_batch_dims) {
+    new_dim->set_size(2);
+    new_dim->set_padding_low(0);
+    new_dim->set_padding_high(0);
+    new_dim->set_stride(1);  // std::max<int64_t>(1, 2 - 1)
+    new_dim->set_window_dilation(1);
+    new_dim->set_base_dilation(2);
+    new_dim->set_window_reversal(false);
+  } else {
+    if (lhs_concat_dim != -1) {
+      new_dim->set_size(1);
+      new_dim->set_padding_low(0);
+      new_dim->set_padding_high(0);
+      new_dim->set_stride(1);
+      new_dim->set_window_dilation(1);
+      new_dim->set_base_dilation(1);
+      new_dim->set_window_reversal(false);
+    }
+    if (rhs_concat_dim != -1) {
+      new_dim->set_size(2);          // rhs_size
+      new_dim->set_padding_low(1);   // rhs_size - 1
+      new_dim->set_padding_high(1);  // rhs_size - 1
+      new_dim->set_stride(1);
+      new_dim->set_window_dilation(1);
+      new_dim->set_base_dilation(1);
+      new_dim->set_window_reversal(true);
+    }
+  }
+
+  VLOG(2) << "new_window: " << new_window.ShortDebugString();
+  return new_window;
+}
+
+ConvolutionDimensionNumbers GenNewConvDNums(
+    const HloInstruction* original_dot, const HloInstruction* dot_lhs,
+    const HloInstruction* dot_rhs, int64_t lhs_concat_dim,
+    int64_t rhs_concat_dim, bool windowed_at_contracting_dims,
+    bool windowed_at_batch_dims,
+    const std::vector<int64_t>& lhs_to_output_indices,
+    const std::vector<int64_t>& rhs_to_output_indices,
+    const Shape& new_dot_shape) {
+  // Generate the new conv dimension numbers.
+  const ConvolutionDimensionNumbers& dnums =
+      original_dot->convolution_dimension_numbers();
+  // Handle the LHS dimension numbers.
+  int64_t input_batch_dimension = dnums.input_batch_dimension();
+  int64_t input_feature_dimension = dnums.input_feature_dimension();
+  std::vector<int64_t> input_spatial_dimensions(
+      dnums.input_spatial_dimensions().begin(),
+      dnums.input_spatial_dimensions().end());
+  if (lhs_concat_dim != -1) {
+    if (lhs_concat_dim <= input_batch_dimension) {
+      input_batch_dimension++;
+    }
+    if (lhs_concat_dim <= input_feature_dimension) {
+      input_feature_dimension++;
+    }
+    for (int64_t i = 0; i < input_spatial_dimensions.size(); ++i) {
+      if (lhs_concat_dim <= input_spatial_dimensions[i]) {
+        input_spatial_dimensions[i]++;
+      }
+    }
+    input_spatial_dimensions.push_back(lhs_concat_dim);
+  }
+  if (rhs_concat_dim != -1 && !windowed_at_contracting_dims &&
+      !windowed_at_batch_dims) {
+    input_spatial_dimensions.push_back(dot_lhs->shape().dimensions().size() -
+                                       1);
+  }
+  // Handle the RHS dimension numbers.
+  int64_t kernel_input_feature_dimension =
+      dnums.kernel_input_feature_dimension();
+  int64_t kernel_output_feature_dimension =
+      dnums.kernel_output_feature_dimension();
+  std::vector<int64_t> kernel_spatial_dimensions(
+      dnums.kernel_spatial_dimensions().begin(),
+      dnums.kernel_spatial_dimensions().end());
+  if (rhs_concat_dim != -1) {
+    if (rhs_concat_dim <= kernel_input_feature_dimension) {
+      kernel_input_feature_dimension++;
+    }
+    if (rhs_concat_dim <= kernel_output_feature_dimension) {
+      kernel_output_feature_dimension++;
+    }
+    for (int64_t i = 0; i < kernel_spatial_dimensions.size(); ++i) {
+      if (rhs_concat_dim <= kernel_spatial_dimensions[i]) {
+        kernel_spatial_dimensions[i]++;
+      }
+    }
+    kernel_spatial_dimensions.push_back(rhs_concat_dim);
+  }
+  if (lhs_concat_dim != -1 && !windowed_at_contracting_dims &&
+      !windowed_at_batch_dims) {
+    kernel_spatial_dimensions.push_back(dot_rhs->shape().dimensions().size() -
+                                        1);
+  }
+  // Handle the Output dimension numbers.
+  int64_t output_batch_dimension = dnums.output_batch_dimension();
+  int64_t output_feature_dimension = dnums.output_feature_dimension();
+  std::vector<int64_t> output_spatial_dimensions(
+      dnums.output_spatial_dimensions().begin(),
+      dnums.output_spatial_dimensions().end());
+  if (!windowed_at_contracting_dims) {
+    auto output_slice_dim = lhs_concat_dim != -1
+                                ? lhs_to_output_indices[lhs_concat_dim]
+                                : rhs_to_output_indices[rhs_concat_dim];
+    if (output_slice_dim <= output_batch_dimension) {
+      output_batch_dimension++;
+    }
+    if (output_slice_dim <= output_feature_dimension) {
+      output_feature_dimension++;
+    }
+    for (int64_t i = 0; i < output_spatial_dimensions.size(); ++i) {
+      if (output_slice_dim <= output_spatial_dimensions[i]) {
+        output_spatial_dimensions[i]++;
+      }
+    }
+    output_spatial_dimensions.push_back(output_slice_dim);
+  } else {
+    output_spatial_dimensions.push_back(new_dot_shape.dimensions().size() - 1);
+  }
+  // Construct the new dot dimension numbers.
+  ConvolutionDimensionNumbers new_dnums;
+  new_dnums.set_input_batch_dimension(input_batch_dimension);
+  new_dnums.set_input_feature_dimension(input_feature_dimension);
+  for (auto dim : input_spatial_dimensions) {
+    new_dnums.add_input_spatial_dimensions(dim);
+  }
+  new_dnums.set_kernel_input_feature_dimension(kernel_input_feature_dimension);
+  new_dnums.set_kernel_output_feature_dimension(
+      kernel_output_feature_dimension);
+  for (auto dim : kernel_spatial_dimensions) {
+    new_dnums.add_kernel_spatial_dimensions(dim);
+  }
+  new_dnums.set_output_batch_dimension(output_batch_dimension);
+  new_dnums.set_output_feature_dimension(output_feature_dimension);
+  for (auto dim : output_spatial_dimensions) {
+    new_dnums.add_output_spatial_dimensions(dim);
+  }
+
+  return new_dnums;
+}
+
 bool HasReplicatedSharding(const HloSharding& sharding) {
   if (sharding.IsTuple()) {
     return absl::c_any_of(sharding.tuple_elements(), HasReplicatedSharding);
@@ -77,18 +271,15 @@ bool HasReplicatedSharding(const HloSharding& sharding) {
 HloComputation* MakeBinaryAdd(PrimitiveType type, HloModule* module) {
   HloComputation::Builder sum_b("add");
   auto x = sum_b.AddInstruction(HloInstruction::CreateParameter(
-      /*parameter_number=*/0, ShapeUtil::MakeValidatedShape(type, {}).value(),
-      "x"));
+      /*parameter_number=*/0, ShapeUtil::MakeShape(type, {}), "x"));
   auto y = sum_b.AddInstruction(HloInstruction::CreateParameter(
-      /*parameter_number=*/1, ShapeUtil::MakeValidatedShape(type, {}).value(),
-      "y"));
+      /*parameter_number=*/1, ShapeUtil::MakeShape(type, {}), "y"));
   if (type == PRED) {
     sum_b.AddInstruction(HloInstruction::CreateBinary(
-        ShapeUtil::MakeValidatedShape(type, {}).value(), HloOpcode::kOr, x, y));
+        ShapeUtil::MakeShape(type, {}), HloOpcode::kOr, x, y));
   } else {
     sum_b.AddInstruction(HloInstruction::CreateBinary(
-        ShapeUtil::MakeValidatedShape(type, {}).value(), HloOpcode::kAdd, x,
-        y));
+        ShapeUtil::MakeShape(type, {}), HloOpcode::kAdd, x, y));
   }
   HloComputation* reduction = module->AddEmbeddedComputation(sum_b.Build());
   return reduction;
@@ -129,7 +320,7 @@ Shape MakePartitionedShape(const Shape& shape, const HloSharding& sharding) {
           MakePartitionedShape(ShapeUtil::GetTupleElementShape(shape, i),
                                sharding.GetSubSharding(shape, {i})));
     }
-    return ShapeUtil::MakeValidatedTupleShape(subshapes).value();
+    return ShapeUtil::MakeTupleShape(subshapes);
   }
   return sharding.TileShape(shape);
 }
@@ -158,7 +349,7 @@ Shape MakeNonPaddedShapeForGivenPartition(const Shape& shape,
           ShapeUtil::GetTupleElementShape(shape, i),
           sharding.GetSubSharding(shape, {i}), partition_id));
     }
-    return ShapeUtil::MakeValidatedTupleShape(subshapes).value();
+    return ShapeUtil::MakeTupleShape(subshapes);
   }
 
   if (sharding.IsReplicated()) {
@@ -168,7 +359,7 @@ Shape MakeNonPaddedShapeForGivenPartition(const Shape& shape,
     if (partition_id == *sharding.UniqueDevice()) {
       return shape;
     }
-    return ShapeUtil::MakeValidatedTupleShape({}).value();
+    return ShapeUtil::MakeTupleShape({});
   }
 
   auto partition_shape = shape;
@@ -222,7 +413,7 @@ std::vector<HloInstruction*> MakeTiledPartitionOrdinals(
   if (sharding.ReplicateOnLastTileDim()) {
     dimensions.remove_suffix(1);
   }
-  auto table_shape = ShapeUtil::MakeValidatedShape(S32, dimensions).value();
+  auto table_shape = ShapeUtil::MakeShape(S32, dimensions);
   return MakePartitionOffsets(table_shape, sharding, partition_id, b);
 }
 
@@ -530,8 +721,8 @@ std::optional<HloSharding> PartialReplicateReshardCompatibleSharding(
       target_sharding.tile_assignment().dimensions().begin(),
       target_sharding.tile_assignment().dimensions().begin() + rank);
   if (hlo_sharding_util::IsSubTilingOrEqualSharding(
-          ShapeUtil::MakeValidatedShape(F32, shape_dims).value(),
-          target_sharding, partial_sharding)) {
+          ShapeUtil::MakeShape(F32, shape_dims), target_sharding,
+          partial_sharding)) {
     return target_sharding;
   }
 
@@ -794,7 +985,7 @@ int64_t MultiplyAddDivideOffsetCalculation::Calculate(
 
 HloInstruction* MultiplyAddDivideOffsetCalculation::Calculate(
     HloInstruction* shard_ordinal, SpmdBuilder* b) const {
-  auto scalar_shape = ShapeUtil::MakeValidatedShape(S32, {}).value();
+  auto scalar_shape = ShapeUtil::MakeShape(S32, {});
   if (multiplier_ == 0) {
     return b->AddInstruction(HloInstruction::CreateConstant(
         LiteralUtil::CreateR0<int32_t>(offset_ / divisor_)));
@@ -1378,12 +1569,11 @@ HloInstruction* ExchangeHaloCompact(
         continue;
       }
       HloInstruction* pred = b->AddInstruction(HloInstruction::CreateCompare(
-          ShapeUtil::MakeValidatedScalarShape(PRED).value(), selector,
+          ShapeUtil::MakeScalarShape(PRED), selector,
           CreateR0WithType(S32, i, b), ComparisonDirection::kEq));
       pred = b->AddInstruction(HloInstruction::CreateBroadcast(
-          ShapeUtil::MakeValidatedShape(PRED, selected->shape().dimensions())
-              .value(),
-          pred, {}));
+          ShapeUtil::MakeShape(PRED, selected->shape().dimensions()), pred,
+          {}));
       selected = b->AddInstruction(
           HloInstruction::CreateTernary(selected->shape(), HloOpcode::kSelect,
                                         pred, unique_pieces[i], selected));
@@ -1695,9 +1885,8 @@ std::optional<HloInstruction*> ExchangeHaloAndGetValidData(
     if (pad_value->shape().element_type() !=
         valid_slice->shape().element_type()) {
       pad_value = b->AddInstruction(HloInstruction::CreateConvert(
-          ShapeUtil::MakeValidatedShape(valid_slice->shape().element_type(),
-                                        pad_value->shape().dimensions())
-              .value(),
+          ShapeUtil::MakeShape(valid_slice->shape().element_type(),
+                               pad_value->shape().dimensions()),
           pad_value));
     }
     auto masking_value = b->AddInstruction(
@@ -1736,9 +1925,7 @@ HloInstruction* HaloExchangeToPadOnLeft(PartitionedHlo& original,
 
   auto reshard_window = original.ReshardAsWindowedInput(
       window, original.sharding(),
-      CreateZero(ShapeUtil::MakeValidatedShape(
-                     original.base_shape().element_type(), {})
-                     .value(),
+      CreateZero(ShapeUtil::MakeShape(original.base_shape().element_type(), {}),
                  original.state().b),
       /*mask_invalid_region=*/false);
   if (!reshard_window.has_value()) {
@@ -2535,10 +2722,9 @@ ReshardDataForSlicing(absl::Span<const int64_t> strides,
 
   return to_reshard.ReshardAsWindowedInput(
       window, target_sharding,
-      CreateZero(ShapeUtil::MakeValidatedShape(
-                     to_reshard.hlo()->shape().element_type(), {})
-                     .value(),
-                 b),
+      CreateZero(
+          ShapeUtil::MakeShape(to_reshard.hlo()->shape().element_type(), {}),
+          b),
       /*mask_invalid_region=*/false);
 }
 
