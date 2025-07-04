@@ -39,7 +39,11 @@ class XnnGraphFusion : public InstructionFusion {
   HloInstruction* Fuse(HloInstruction* producer, HloInstruction* consumer,
                        HloComputation* computation) override;
 
-  bool IsOpSupported(HloInstruction* instr) const;
+  std::vector<HloComputation*> GetNonFusionComputations(
+      HloModule* module,
+      const absl::flat_hash_set<absl::string_view>& execution_threads) override;
+
+  bool IsOpSupported(const HloInstruction* instr) const;
 
   bool IsXnnGraphFusion(const HloInstruction* instr) const;
 };

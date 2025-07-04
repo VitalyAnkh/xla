@@ -360,7 +360,8 @@ void PopulateWithFloatingPointData(
       // We want to generate floating point numbers to a fixed precision, while
       // keeping them between -1 and 1. This preserves their bits of precision
       // while keeping the numbers small.
-      value = static_cast<FloatT>(temp * pow(2, -ceil(log2(abs(temp)))));
+      value = static_cast<FloatT>(
+          temp == 0 ? 0 : temp * pow(2, -ceil(log2(abs(temp)))));
     }
   } else if (no_duplicates) {
     PopulateWithNoDuplicateData<FloatT>(literal, engine);
@@ -434,7 +435,7 @@ void PopulateWithRandomIntegralDataWithBounds(Literal* literal,
 /* static */ Literal LiteralUtil::CreateFromDimensions(
     PrimitiveType primitive_type, absl::Span<const int64_t> dimensions) {
   return Literal::CreateFromShape(
-      ShapeUtil::MakeValidatedShape(primitive_type, dimensions).value());
+      ShapeUtil::MakeShape(primitive_type, dimensions));
 }
 
 /* static */ Literal LiteralUtil::ConvertS8ToF32(
@@ -557,16 +558,14 @@ void PopulateWithRandomIntegralDataWithBounds(Literal* literal,
 
 /* static */ Literal LiteralUtil::CreateR1(const tsl::core::Bitmap& values) {
   Literal literal(
-      ShapeUtil::MakeValidatedShape(PRED, {static_cast<int64_t>(values.bits())})
-          .value());
+      ShapeUtil::MakeShape(PRED, {static_cast<int64_t>(values.bits())}));
   literal.PopulateR1(values);
   return literal;
 }
 
 /* static */ Literal LiteralUtil::CreateR1U8(absl::string_view value) {
   Literal literal(
-      ShapeUtil::MakeValidatedShape(U8, {static_cast<int64_t>(value.size())})
-          .value());
+      ShapeUtil::MakeShape(U8, {static_cast<int64_t>(value.size())}));
   for (int i = 0, end = value.size(); i < end; ++i) {
     literal.Set<uint8_t>({i}, value[i]);
   }
@@ -590,9 +589,8 @@ void PopulateWithRandomIntegralDataWithBounds(Literal* literal,
   CHECK_EQ(ShapeUtil::ElementsIn(literal.shape()), new_num_elements);
   CHECK_EQ(new_dimensions.size(), minor_to_major.size());
 
-  Literal new_literal(ShapeUtil::MakeValidatedShape(
-                          literal.shape().element_type(), new_dimensions)
-                          .value());
+  Literal new_literal(
+      ShapeUtil::MakeShape(literal.shape().element_type(), new_dimensions));
 
   // Create a new shape with the given minor-to-major layout. This shape is used
   // solely for converting linear address to multi-dimensional addresses when
@@ -668,8 +666,7 @@ void PopulateWithRandomIntegralDataWithBounds(Literal* literal,
   for (const auto* element : elements) {
     element_shapes.push_back(&element->shape());
   }
-  Literal literal(
-      ShapeUtil::MakeValidatedTupleShapeWithPtrs(element_shapes).value());
+  Literal literal(ShapeUtil::MakeTupleShapeWithPtrs(element_shapes));
   for (int i = 0, end = elements.size(); i < end; ++i) {
     TF_CHECK_OK(literal.CopyFrom(*elements[i], /*dest_shape_index=*/{i}));
   }
@@ -683,8 +680,7 @@ void PopulateWithRandomIntegralDataWithBounds(Literal* literal,
   for (const auto& element : elements) {
     element_shapes.push_back(&element.shape());
   }
-  Literal literal(
-      ShapeUtil::MakeValidatedTupleShapeWithPtrs(element_shapes).value());
+  Literal literal(ShapeUtil::MakeTupleShapeWithPtrs(element_shapes));
   for (int i = 0, end = elements.size(); i < end; ++i) {
     TF_CHECK_OK(literal.CopyFrom(elements[i], /*dest_shape_index=*/{i}));
   }
@@ -698,8 +694,7 @@ void PopulateWithRandomIntegralDataWithBounds(Literal* literal,
   for (const auto& element : elements) {
     element_shapes.push_back(&element.shape());
   }
-  Literal literal(
-      ShapeUtil::MakeValidatedTupleShapeWithPtrs(element_shapes).value());
+  Literal literal(ShapeUtil::MakeTupleShapeWithPtrs(element_shapes));
   for (int64_t i = 0, end = elements.size(); i < end; ++i) {
     TF_CHECK_OK(
         literal.MoveFrom(std::move(elements[i]), /*dest_shape_index=*/{i}));
@@ -818,6 +813,15 @@ absl::StatusOr<Literal> MakeFakeLiteral(
       },
       shape.element_type()));
   return std::move(literal);
+}
+
+/*static*/ std::vector<const Literal*> LiteralUtil::MakePointers(
+    absl::Span<const Literal> literals) {
+  std::vector<const Literal*> pointers(literals.size());
+  for (int i = 0; i < literals.size(); i++) {
+    pointers[i] = &literals[i];
+  }
+  return pointers;
 }
 
 }  // namespace xla

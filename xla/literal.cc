@@ -30,6 +30,7 @@ limitations under the License.
 #include <vector>
 
 #include "absl/base/casts.h"
+#include "absl/base/no_destructor.h"
 #include "absl/container/inlined_vector.h"
 #include "absl/functional/function_ref.h"
 #include "absl/log/check.h"
@@ -112,11 +113,11 @@ template <PrimitiveType kType>
 const Shape& ScalarShapeImpl() {
   static_assert(primitive_util::IsArrayType(kType),
                 "Not a valid type for a scalar.");
-  static const Shape* const shape = [] {
-    auto* const shape = new Shape(kType, /*dimensions=*/{});
-    shape->mutable_layout();
+  static const absl::NoDestructor<Shape> shape([] {
+    Shape shape(kType, /*dimensions=*/{});
+    shape.mutable_layout();
     return shape;
-  }();
+  }());
   return *shape;
 }
 
@@ -130,7 +131,7 @@ const Shape& ScalarShape(PrimitiveType type) {
 
 const Shape& NilShape() {
   // Create a nullary tuple.
-  static const Shape* const shape = new Shape(std::vector<Shape>());
+  static const absl::NoDestructor<Shape> shape(std::vector<Shape>{});
   return *shape;
 }
 
@@ -972,8 +973,7 @@ void MutableLiteralBase::PopulateLinearInplaceInternal(
     // We create a fake shape of the work, so we can rely on the existing
     // `ForEachIndexParallel` implementation.
     Shape work_shape =
-        ShapeUtil::MakeValidatedShape(shape().element_type(), {num_partitions})
-            .value();
+        ShapeUtil::MakeShape(shape().element_type(), {num_partitions});
 
     if (parallel) {
       ShapeUtil::ForEachIndexParallel(work_shape, init_function);
@@ -1200,7 +1200,7 @@ absl::StatusOr<Literal> LiteralBase::Reshape(
   // Because the layout is monotonic, we can simply reuse the same sequence of
   // values without changing their order.
   *output.mutable_shape_do_not_use() =
-      ShapeUtil::MakeValidatedShape(shape().element_type(), dimensions).value();
+      ShapeUtil::MakeShape(shape().element_type(), dimensions);
 
   int64_t elements_before = ShapeUtil::ElementsIn(shape());
   int64_t elements_after = ShapeUtil::ElementsIn(output.shape());
@@ -1795,7 +1795,7 @@ absl::StatusOr<Literal> ConvertSwitch(const LiteralBase& literal,
   if (literal.shape().element_type() == primitive_dest_type) {
     return literal.Clone();
   }
-  // Source Array type requirement is ensured by IsDenseArray before.
+  // Source Array type requirement is ensured before.
   if (!primitive_util::IsArrayType(primitive_dest_type) ||
       !primitive_util::IsArrayType(literal.shape().element_type())) {
     return Unimplemented("%s from type %s to type %s is not implemented.",
@@ -1890,9 +1890,8 @@ absl::StatusOr<Literal> LiteralBase::ConvertToShape(
   for (const Literal& element : elements) {
     element_shapes.push_back(&element.shape());
   }
-  Literal literal(
-      ShapeUtil::MakeValidatedTupleShapeWithPtrs(element_shapes).value(),
-      /*allocate_arrays=*/false);
+  Literal literal(ShapeUtil::MakeTupleShapeWithPtrs(element_shapes),
+                  /*allocate_arrays=*/false);
   for (int i = 0, end = elements.size(); i < end; ++i) {
     TF_CHECK_OK(
         literal.MoveFrom(std::move(elements[i]), /*dest_shape_index=*/{i}));
@@ -2079,7 +2078,7 @@ bool LiteralBase::IsAll(int8_t value) const {
   if (primitive_util::IsUnsignedIntegralType(ty) && value < 0) {
     return false;
   }
-  Literal scalar(ShapeUtil::MakeValidatedScalarShape(ty).value());
+  Literal scalar(ShapeUtil::MakeScalarShape(ty));
   return primitive_util::ArrayTypeSwitch(
       [&](auto primitive_type_constant) -> bool {
         using NativeT = NativeTypeOf<primitive_type_constant>;
@@ -2110,7 +2109,7 @@ bool LiteralBase::IsAllFloatImpl(float value, bool round_value) const {
   if (!primitive_util::IsFloatingPointType(ty)) {
     return false;
   }
-  Literal scalar(ShapeUtil::MakeValidatedScalarShape(ty).value());
+  Literal scalar(ShapeUtil::MakeScalarShape(ty));
   return primitive_util::FloatingPointTypeSwitch(
       [&](auto primitive_type_constant) -> bool {
         using NativeT = NativeTypeOf<primitive_type_constant>;
@@ -2128,7 +2127,7 @@ bool LiteralBase::IsAllComplex(complex64 value) const {
   if (!primitive_util::IsComplexType(ty)) {
     return false;
   }
-  Literal scalar(ShapeUtil::MakeValidatedScalarShape(ty).value());
+  Literal scalar(ShapeUtil::MakeScalarShape(ty));
   return primitive_util::ComplexTypeSwitch(
       [&](auto primitive_type_constant) -> bool {
         using NativeT = NativeTypeOf<primitive_type_constant>;

@@ -99,6 +99,7 @@ cc_library(
     hdrs = ["stablehlo_export.h"],
     deps = [
         ":export_callback_custom_calls",
+        ":export_manual_reduction_collectives_cc",
         ":export_ops",
         ":export_shardings",
         ":shard_map_export",
@@ -180,8 +181,11 @@ cc_library(
     hdrs = ["export_manual_reduction_collectives.h"],
     deps = [
         "//xla:array",
+        "//xla/mlir_hlo",
         "//xla/service/spmd/shardy:utils",
+        "@com_google_absl//absl/log",
         "@com_google_absl//absl/log:check",
+        "@com_google_absl//absl/strings:string_view",
         "@llvm-project//llvm:Support",
         "@llvm-project//mlir:IR",
         "@llvm-project//mlir:Pass",

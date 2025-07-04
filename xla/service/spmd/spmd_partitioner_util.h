@@ -63,6 +63,21 @@ limitations under the License.
 namespace xla {
 namespace spmd {
 
+Window GenNewWindow(const HloInstruction* original_dot,
+                    const HloInstruction* dot_lhs,
+                    const HloInstruction* dot_rhs, int64_t lhs_concat_dim,
+                    int64_t rhs_concat_dim, bool windowed_at_contracting_dims,
+                    bool windowed_at_batch_dims);
+
+ConvolutionDimensionNumbers GenNewConvDNums(
+    const HloInstruction* original_dot, const HloInstruction* dot_lhs,
+    const HloInstruction* dot_rhs, int64_t lhs_concat_dim,
+    int64_t rhs_concat_dim, bool windowed_at_contracting_dims,
+    bool windowed_at_batch_dims,
+    const std::vector<int64_t>& lhs_to_output_indices,
+    const std::vector<int64_t>& rhs_to_output_indices,
+    const Shape& new_dot_shape);
+
 template <typename T>
 using IsCompOrCompBuilder =
     typename std::enable_if_t<std::is_same<HloComputation, T>::value ||
@@ -135,10 +150,9 @@ HloInstruction* CreateOne(const Shape& shape, T* b) {
 
 template <typename NativeT, typename T, typename = IsCompOrCompBuilder<T>>
 HloInstruction* CreateR0WithType(PrimitiveType type, NativeT value, T* b) {
-  auto literal =
-      LiteralUtil::CreateR0(value)
-          .ConvertToShape(ShapeUtil::MakeValidatedShape(type, {}).value())
-          .value();
+  auto literal = LiteralUtil::CreateR0(value)
+                     .ConvertToShape(ShapeUtil::MakeShape(type, {}))
+                     .value();
   return b->AddInstruction(HloInstruction::CreateConstant(std::move(literal)));
 }
 
@@ -185,10 +199,9 @@ HloInstruction* TableLookup(absl::Span<const NativeT> table, PrimitiveType type,
   HloInstruction* table_hlo = b->AddInstruction(
       HloInstruction::CreateConstant(LiteralUtil::CreateR1<NativeT>(table)));
   HloInstruction* value = b->AddInstruction(HloInstruction::CreateDynamicSlice(
-      ShapeUtil::MakeValidatedShape(type, {1}).value(), table_hlo, {ordinal},
-      {1}));
-  return b->AddInstruction(HloInstruction::CreateReshape(
-      ShapeUtil::MakeValidatedShape(type, {}).value(), value));
+      ShapeUtil::MakeShape(type, {1}), table_hlo, {ordinal}, {1}));
+  return b->AddInstruction(
+      HloInstruction::CreateReshape(ShapeUtil::MakeShape(type, {}), value));
 }
 
 // Returns the shard shape for a partition without padding due to uneven
@@ -227,7 +240,7 @@ HloInstruction* PadToShape(HloInstruction* hlo, const Shape& padded_shape, T* b,
                                               hlo->shape().dimensions(i));
   }
   const Shape padding_shape =
-      ShapeUtil::MakeValidatedScalarShape(hlo->shape().element_type()).value();
+      ShapeUtil::MakeScalarShape(hlo->shape().element_type());
   HloInstruction* padding =
       value.has_value() ? CreateConstant(padding_shape, std::move(*value), b)
                         : CreateZero(padding_shape, b);
@@ -908,7 +921,7 @@ absl::StatusOr<std::pair<int64_t, int64_t>> EvaluatePartitionCost(
   HloModule fake_module("fake_module", module->config(), std::move(comp_env));
   auto temp_b = HloComputation::Builder("temp_entry");
   auto temp_p = temp_b.AddInstruction(HloInstruction::CreateParameter(
-      0, ShapeUtil::MakeValidatedShape(F32, {}).value(), "input"));
+      0, ShapeUtil::MakeShape(F32, {}), "input"));
   HloComputation* temp_entry = fake_module.AddEntryComputation(temp_b.Build());
 
   TF_ASSIGN_OR_RETURN(SpmdPartitioningVisitor * visitor,
